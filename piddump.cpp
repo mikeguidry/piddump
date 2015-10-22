@@ -1,7 +1,9 @@
 /*
 one of the five subsystems for distributed fuzzing @ https://github.com/mikeguidry/dfuzz
 PID Dump -
-Dumps all memory inside of a process for insertion into the fuzzer
+Dumps all memory inside of a process for insertion into the fuzzer..
+
+NOTICE: A lot of this code has been grabbed from other places...
 */
 #include <windows.h>
 #include <stdio.h>
