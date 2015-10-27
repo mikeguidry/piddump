@@ -34,7 +34,7 @@ int FindModuleBase(DWORD_PTR pid, char *module);
 
 
 // ugly global variable.. i pulled this together from other code
-HANDLE hProcess;
+HANDLE hProcess = NULL;
 
 
 ThreadInfo *thread_list = NULL;
@@ -625,8 +625,14 @@ BOOL RemoteLibraryFunction( HANDLE hProcess, LPCSTR lpModuleName, LPCSTR lpProcN
 	DWORD dwOut = 0;
 	
     LPVOID lpFunctionAddress = GetProcAddress(GetModuleHandleA(lpModuleName), lpProcName);
-    if( !lpFunctionAddress ) lpFunctionAddress = GetProcAddress(LoadLibraryA(lpModuleName), lpProcName);
-    if( !lpFunctionAddress ) goto ErrorHandler;
+    if( !lpFunctionAddress ) {
+		printf("Couldnt find func address\n");
+		lpFunctionAddress = GetProcAddress(LoadLibraryA(lpModuleName), lpProcName);
+	}
+    if( !lpFunctionAddress ) {
+		printf("error\n");
+		goto ErrorHandler;
+	}
 	
     if( lpParameters )
     {
@@ -636,10 +642,15 @@ BOOL RemoteLibraryFunction( HANDLE hProcess, LPCSTR lpModuleName, LPCSTR lpProcN
         SIZE_T dwBytesWritten = 0;
         BOOL result = WriteProcessMemory( hProcess, lpRemoteParams, lpParameters, dwParamSize, &dwBytesWritten);
         if( !result || dwBytesWritten < 1 ) goto ErrorHandler;
-    }
+    } else {
+		printf("error with lpparams\n");
+	}
 	
     hThread = CreateRemoteThread( hProcess, NULL, 0, (LPTHREAD_START_ROUTINE)lpFunctionAddress, lpRemoteParams, NULL, NULL );
-    if( !hThread ) goto ErrorHandler;
+    if( !hThread ) {
+		printf("couldnt start thread\n");
+		goto ErrorHandler;
+	}
 	
    
     while(GetExitCodeThread(hThread, &dwOut)) {
@@ -781,6 +792,7 @@ int main(int argc, char *argv[]) {
 				printf("Couldnt inject..resuming normally\n");
 			} else printf("Successfully injected.. handle %X\n", hInjected);
 
+			// resume all threads...
 			PauseThreads(pid, 1);
 			
 			

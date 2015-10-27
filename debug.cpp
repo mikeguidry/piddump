@@ -4,15 +4,23 @@
 #include <shlwapi.h>
 #include <Tlhelp32.h>
 #include <dbghelp.h>
+#include <windows.h>
+#include "structures.h"
+#include "debug.h"
+
 #pragma comment(lib, "dbghelp.lib")
 #pragma comment(lib, "shlwapi.lib")
 
+// hProcess global from other C file.. we'll remove globals later.. oh well
 extern HANDLE hProcess;
-#include <windows.h>
-#include "structures.h""
-#include "debug.h"
 
+// list of our functions being fuzzed (where we set breakpoints, original code, etc...)
+Modification *mod_list = NULL;
+
+// index threads inside of a PID
 BOOL IndexThreads(unsigned long pid);
+
+
 
 
 DWORD_PTR WINAPI GetThreadStartAddress(HANDLE hProcess, HANDLE hThread) {
@@ -41,9 +49,6 @@ DWORD_PTR WINAPI GetThreadStartAddress(HANDLE hProcess, HANDLE hThread) {
 	
 }
 
-
-
-Modification *mod_list = NULL;
 
 
 
@@ -80,6 +85,9 @@ Modification *ModificationAdd(DWORD_PTR Address, char *replace, int size) {
 }
 
 
+
+
+
 Modification *ModificationSearch(DWORD_PTR Address) {
 	Modification *mptr = mod_list;
 
@@ -90,6 +98,9 @@ Modification *ModificationSearch(DWORD_PTR Address) {
 
 	return NULL;
 }
+
+
+
 
 int Modification_Undo(DWORD_PTR Address) {
 	Modification *mptr = ModificationSearch(Address);
@@ -108,26 +119,11 @@ int Modification_Undo(DWORD_PTR Address) {
 		VirtualProtectEx(hProcess, (LPVOID) Address, mptr->original_size, old_prot, &old_prot);
 
 		return 1;
-		/*
-		HeapFree(GetProcessHeap(), 0, mptr->original_data);
-		HeapFree(GetProcessHeap(), 0, mptr->replace_data);
-
-		Modification *mptr2 = mod_list;
-		if (mod_list == mptr) {
-			mod_list = mptr->next;
-		} else {
-			while (mptr2->next != mptr) {
-				mptr2 = mptr2->next;
-			}
-			mptr2->next = mptr2->next;
-		}
-
-		HeapFree(GetProcessHeap(), 0, mptr);
-		return 1;*/
 	}
 
 	return 0;
 }
+
 
 BOOL  AddDebugPrivilege() { 
 	HANDLE Token; 
@@ -146,6 +142,10 @@ BOOL  AddDebugPrivilege() {
     return FALSE; 
 } // AddDebugPrivilege 
 
+
+
+
+
 DWORD_PTR RemoteDerefDWORD(DWORD_PTR Address) {
 	DWORD rw_count = 0;
 	DWORD_PTR ret = 0;
@@ -154,6 +154,9 @@ DWORD_PTR RemoteDerefDWORD(DWORD_PTR Address) {
 
 	return ret;
 }
+
+
+
 
 
 int WithinStack(HANDLE hProcess, HANDLE hThread, DWORD_PTR Address, CONTEXT *ctx) {
@@ -180,6 +183,9 @@ int WithinStack(HANDLE hProcess, HANDLE hThread, DWORD_PTR Address, CONTEXT *ctx
 
 	return 1;
 }
+
+
+
 
 int AddrInExecutable(DWORD_PTR pid, DWORD_PTR Address) {
 	int ret = 0;
@@ -212,10 +218,14 @@ int AddrInExecutable(DWORD_PTR pid, DWORD_PTR Address) {
 	return ret;
 }
 
+
+
+
 // each thread has to be stepped out of any windows DLLs or other DLLs...
 // so we can hook and redirect those to API proxy or a simulation..
 //int StepUpFrame(int PID, HANDLE hThread, DWORD_PTR TID) {
 int DebugTillReady(DWORD_PTR PID) {
+	Modification *mptr = NULL;
 	printf("\n----\nDebug Till Ready\n");	
 	// get threads context..
 	DEBUG_EVENT DebugEv;
@@ -228,83 +238,6 @@ int DebugTillReady(DWORD_PTR PID) {
 	
 	DebugActiveProcess(PID);
 
-	/*printf("hThread %X TID %X\n", hThread, TID);
-	
-	// find the threads start address... so we can get back to a frame inside of it..
-	DWORD_PTR StartAddress = GetThreadStartAddress(hProcess, hThread);
-	if (!AddrInExecutable(PID, StartAddress) && 1==0) {
-		return 0;
-	}
-
-	printf("1\n");
-
-	SuspendThread(hThread);
-
-	ctx.ContextFlags = CONTEXT_FULL;
-	if (GetThreadContext(hThread, &ctx) == 0) {
-		printf("Couldnt get thread context.. %X\n", hThread);
-		return -1;
-	}
-
-	printf("2\n");
-
-	int FoundFrame = 0;
-	DWORD_PTR ret_bp_addr = 0;
-	DWORD_PTR CurEbp = ctx.Ebp;
-	int retry = 5;
-	while (!FoundFrame && retry--) {
-		printf("%X loop %X\n", hThread, CurEbp);
-		DWORD_PTR frame_ret_addr = RemoteDerefDWORD(CurEbp + 4);
-
-		if (frame_ret_addr == 0) break;
-		printf("Frame Ret Addr %X\n", frame_ret_addr);
-		if (AddrInExecutable(PID, frame_ret_addr)) {
-			ret_bp_addr = frame_ret_addr;
-			FoundFrame = 1;
-			break;
-		}
-
-		DWORD_PTR NextEbp = RemoteDerefDWORD(CurEbp);
-
-		if (NextEbp == 0) break;
-
-		// ensure the next EBP frame is inside of the stack (some functions wont work like this)
-		if (WithinStack(hProcess, hThread, NextEbp, &ctx)) {
-			printf("next ebp %X is within stack\n", NextEbp);
-			CurEbp = NextEbp;
-			continue;
-		}
-
-		printf("breaking out of loop\n");
-		break;
-	}
-
-	printf("Found EIP to BP %X CUR EBP [%X] Start EBP %X\n", ret_bp_addr, CurEbp, ctx.Ebp);
-
-	
-
-	printf("after loop\n");
-	// if we couldnt find any frames inside of the target executable.. lets just do nothing on this thread
-	if (!FoundFrame) {
-		printf("Couldnt find next EIP for this thread\n");
-		return 0;
-	}
-
-	printf("before mod %X\n", ret_bp_addr);
-
-	char int3[] = "\xCC";
-	Modification *mptr = ModificationAdd(ret_bp_addr, (char *)&int3, 1);
-	printf("after mod\n");
-
-	//ResumeThread(hThread);
-	//ResumeThread(hThread);
-	ResumeThread(hThread);
-	// connect debugger to process... all threads have already been resumed..
-	
-	printf("debugging\n");
-	
-	printf("debug\n");
-	*/
 	
 	BOOL DoneOnce = FALSE;
 	int done = 0;
@@ -356,59 +289,39 @@ int DebugTillReady(DWORD_PTR PID) {
 						}
 
 
-						if (ModificationSearch((DWORD_PTR)DebugEv.u.Exception.ExceptionRecord.ExceptionAddress) != NULL) {
+						
+						if ((mptr = ModificationSearch((DWORD_PTR)DebugEv.u.Exception.ExceptionRecord.ExceptionAddress)) != NULL) {
 							
 							hThread2 = OpenThread(THREAD_ALL_ACCESS, FALSE, DebugEv.dwThreadId);
 
-							CONTEXT ctx;
 							ctx.ContextFlags = CONTEXT_FULL;
 							if (GetThreadContext(hThread2, &ctx) == 0) {
 								printf("Couldnt get thread context.. %X\n", hThread2);
 								return -1;
 							}
 							
+							// since we had the breakpoint.. we have to reverse the EIP
 							ctx.Eip--;
 							SetThreadContext(hThread2, &ctx);
-							printf("EIP %X\n", ctx.Eip);
+							printf("BP @ EIP %X [Function %s <%s>]\n", ctx.Eip, mptr->reason->module_name, mptr->reason->function_name);
 
-							
-							//SuspendThread(hThread2);
 
 							Modification_Undo((DWORD_PTR)DebugEv.u.Exception.ExceptionRecord.ExceptionAddress);
+							// *** We have to redo the breakpoint after we dump!!! I suggest breakpointing the next instruction..
+							// continuing the thread and then setting the original... and then move forward... 
+							// one step at a time.. lets fuzz the first hit of the first time first :)
 
 							CloseHandle(hThread2);
 
 							// take all thread information before execution resumes
 							IndexThreads(PID);
 
-							printf("FOUND BP!\n");
+							printf("We hit a fuzzed function breakpoint.  Returning so we can dump the data...\n");
 							ret = 1;
 							done = 1;
 							
 							break;
 						}
-
-						/*if (DebugEv.u.Exception.ExceptionRecord.ExceptionAddress == (void *)ret_bp_addr) {
-							printf("Reached the point we wanted.. EIP %X\n", DebugEv.u.Exception.ExceptionRecord.ExceptionAddress);
-
-							
-							ctx.ContextFlags = CONTEXT_FULL;
-							if (GetThreadContext(hThread, &ctx) == 0) {
-								printf("Couldnt get thread context.. %X\n", hThread);
-								return -1;
-							}
-							printf("EIP %X\n", ctx.Eip);
-
-							ctx.Eip--;
-
-							SetThreadContext(hThread, &ctx);
-
-							printf("finished debug\n");
-
-							done = 1;
-
-							dwContinueStatus = DBG_CONTINUE;
-						} */
 						break;
 
 					default:
