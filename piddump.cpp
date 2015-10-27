@@ -547,7 +547,7 @@ BOOL IndexThreads(unsigned long pid) {
     // Fill in the size of the structure before using it. 
     te32.dwSize = sizeof(THREADENTRY32); 
 	// Take a snapshot of all threads currently in the system. 
-	hThreadSnap = CreateToolhelp32Snapshot(TH32CS_SNAPTHREAD, 0); 
+	hThreadSnap = CreateToolhelp32Snapshot(TH32CS_SNAPTHREAD, pid); 
     // Walk the thread snapshot to find all threads of the process. 
     // If the thread belongs to the process, add its information 
     // to the display list.
