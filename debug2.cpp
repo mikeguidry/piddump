@@ -9,10 +9,10 @@
 
 extern HANDLE hProcess;
 #include <windows.h>
-#include "structures.h""
 #include "debug.h"
 
-BOOL IndexThreads(unsigned long pid);
+extern int thread_count_location;
+extern DWORD_PTR G_thread_count;
 
 
 DWORD_PTR WINAPI GetThreadStartAddress(HANDLE hProcess, HANDLE hThread) {
@@ -51,8 +51,6 @@ Modification *ModificationAdd(DWORD_PTR Address, char *replace, int size) {
 	Modification *mptr = (Modification *)HeapAlloc(GetProcessHeap(), HEAP_ZERO_MEMORY, sizeof(Modification));
 	if (mptr == NULL) return NULL;
 
-	printf("Mod add addr %X\n", Address);
-
 	mptr->Address = Address;
 	mptr->original_data = (char *)HeapAlloc(GetProcessHeap(), 0, size);
 	mptr->replace_data = (char *)HeapAlloc(GetProcessHeap(), 0, size);
@@ -66,11 +64,8 @@ Modification *ModificationAdd(DWORD_PTR Address, char *replace, int size) {
 	DWORD old_prot = 0;
 	VirtualProtectEx(hProcess, (LPVOID) Address, size, PAGE_EXECUTE_READWRITE, &old_prot);
 
-	// we need to pause the process at this moment!
 	WriteProcessMemory(hProcess, ( void *) Address, mptr->replace_data, 1, &rw_count);
-
 	FlushInstructionCache(hProcess, (const void *)Address, size);
-
 	VirtualProtectEx(hProcess, (LPVOID) Address, size, old_prot, &old_prot);
 
 	mptr->next = mod_list;
@@ -101,14 +96,11 @@ int Modification_Undo(DWORD_PTR Address) {
 		VirtualProtectEx(hProcess, (LPVOID) Address, mptr->original_size, PAGE_EXECUTE_READWRITE, &old_prot);
 
 		DWORD rw_count = 0;
-		// we need to pause the process at this moment..
 		WriteProcessMemory(hProcess, (void *) Address, mptr->original_data, 1, &rw_count);
 		printf("wrote %d bytes to %X\n", rw_count, Address);
 		FlushInstructionCache(hProcess, (const void *)Address, mptr->original_size);
 		VirtualProtectEx(hProcess, (LPVOID) Address, mptr->original_size, old_prot, &old_prot);
 
-		return 1;
-		/*
 		HeapFree(GetProcessHeap(), 0, mptr->original_data);
 		HeapFree(GetProcessHeap(), 0, mptr->replace_data);
 
@@ -123,7 +115,7 @@ int Modification_Undo(DWORD_PTR Address) {
 		}
 
 		HeapFree(GetProcessHeap(), 0, mptr);
-		return 1;*/
+		return 1;
 	}
 
 	return 0;
@@ -154,6 +146,47 @@ DWORD_PTR RemoteDerefDWORD(DWORD_PTR Address) {
 
 	return ret;
 }
+
+DWORD_PTR CaptureSegValue(HANDLE hThread, DWORD_PTR Seg) {
+	LDT_ENTRY ldtSel;
+	
+	if (!GetThreadSelectorEntry(hThread, Seg, &ldtSel)) {
+		printf("Couldnt get thread selector entry for FS for thread %d\n", hThread);
+		exit(-1);
+		return -1;
+	}
+	
+	DWORD_PTR fs_base = (ldtSel.HighWord.Bits.BaseHi << 24 ) | ( ldtSel.HighWord.Bits.BaseMid << 16 ) | ( ldtSel.BaseLow );
+
+	printf("CaptureSegValue(%X) = %X\n", Seg, fs_base);
+	
+	return fs_base;
+}
+
+void CaptureSegs(HANDLE hThread, CONTEXT *ctx) {
+	int i = 0;
+	DWORD_PTR *SegsToGrab[] = { &ctx->SegGs, &ctx->SegFs, &ctx->SegEs, &ctx->SegDs, &ctx->SegCs, &ctx->SegSs, NULL };
+printf("%X %X %X %X %X %x %x\n",
+&ctx->SegGs, &ctx->SegFs, ctx->SegEs, ctx->SegDs, ctx->SegCs, ctx->SegSs
+	  );
+	while (SegsToGrab[i] != NULL) {
+		// deref the pointer of the list of segments..
+		DWORD_PTR *_Seg = (DWORD_PTR *)SegsToGrab[i];
+		DWORD_PTR Seg = *_Seg;
+
+		// grab the real segment linear address..
+		DWORD_PTR Addr = CaptureSegValue(hThread, Seg);
+
+		// replace with the returned
+		*_Seg = Addr;
+
+		i++;
+	}
+
+
+
+}
+
 
 
 int WithinStack(HANDLE hProcess, HANDLE hThread, DWORD_PTR Address, CONTEXT *ctx) {
@@ -199,7 +232,7 @@ int AddrInExecutable(DWORD_PTR pid, DWORD_PTR Address) {
 			if ((Address >= (DWORD_PTR)me.modBaseAddr) && (Address <= (DWORD_PTR)(me.modBaseAddr + me.modBaseSize))) {
 				printf("EIP %X Found in module %s\n", Address, me.szModule);
 
-				if (StrStrI(me.szModule, "ws2_32") != NULL) {
+				if (StrStrI(me.szModule, ".exe") != NULL) {
 					ret = 1;
 				}
 				break;
@@ -212,10 +245,11 @@ int AddrInExecutable(DWORD_PTR pid, DWORD_PTR Address) {
 	return ret;
 }
 
+int ThreadAdd(DWORD_PTR ThreadID, FILE *fd, DWORD_PTR EIP);
 // each thread has to be stepped out of any windows DLLs or other DLLs...
 // so we can hook and redirect those to API proxy or a simulation..
 //int StepUpFrame(int PID, HANDLE hThread, DWORD_PTR TID) {
-int DebugTillReady(DWORD_PTR PID) {
+int DebugTillReady(DWORD_PTR PID, HANDLE hThread, DWORD_PTR TID, FILE *fd) {
 	printf("\n----\nDebug Till Ready\n");	
 	// get threads context..
 	DEBUG_EVENT DebugEv;
@@ -224,9 +258,6 @@ int DebugTillReady(DWORD_PTR PID) {
 	DWORD dwContinueStatus = DBG_CONTINUE;
 
 	HANDLE hThread2;
-
-	
-	DebugActiveProcess(PID);
 
 	/*printf("hThread %X TID %X\n", hThread, TID);
 	
@@ -326,6 +357,11 @@ int DebugTillReady(DWORD_PTR PID) {
 		//printf("debug event code %d proc %X thread %X [%X]\n", DebugEv.dwDebugEventCode, DebugEv.dwDebugEventCode, DebugEv.dwProcessId, TID);
 		if (DebugEv.dwDebugEventCode == EXIT_THREAD_DEBUG_EVENT) {
 			printf("exit thread debug %X\n", DebugEv.u.ExitThread.dwExitCode);
+			if (DebugEv.dwThreadId == TID && 0==1) {
+				printf("our tid!\n");
+				done = 1;
+				//break;
+			}
 		}
 		switch (DebugEv.dwDebugEventCode) {
 			case EXCEPTION_DEBUG_EVENT: 
@@ -363,27 +399,32 @@ int DebugTillReady(DWORD_PTR PID) {
 							CONTEXT ctx;
 							ctx.ContextFlags = CONTEXT_FULL;
 							if (GetThreadContext(hThread2, &ctx) == 0) {
-								printf("Couldnt get thread context.. %X\n", hThread2);
+								printf("Couldnt get thread context.. %X\n", hThread);
 								return -1;
 							}
-							
 							ctx.Eip--;
 							SetThreadContext(hThread2, &ctx);
 							printf("EIP %X\n", ctx.Eip);
 
+							if (!thread_count_location) {
+								thread_count_location = ftell(fd);
+								G_thread_count++;
+								fwrite((void *)&G_thread_count, 1, sizeof(DWORD_PTR), fd);
+							}
 							
-							//SuspendThread(hThread2);
+							ThreadAdd(DebugEv.dwThreadId, fd, ctx.Eip);
+							
+							SuspendThread(hThread2);
 
 							Modification_Undo((DWORD_PTR)DebugEv.u.Exception.ExceptionRecord.ExceptionAddress);
 
 							CloseHandle(hThread2);
 
-							// take all thread information before execution resumes
-							IndexThreads(PID);
-
-							printf("FOUND BP!\n");
+							printf("FOUND BP!");
 							ret = 1;
 							done = 1;
+
+							return 1;
 							
 							break;
 						}
@@ -464,9 +505,10 @@ int DebugTillReady(DWORD_PTR PID) {
 	}
 
 	
-	DebugActiveProcessStop(PID);
+	printf("finished\n");
 
-	printf("Detached debugger from PID %X\n", PID);	
+	//Modification_Undo(ret_bp_addr);
+	printf("after undo\n");
 
 	
 	return ret;

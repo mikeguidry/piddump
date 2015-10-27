@@ -8,6 +8,7 @@ typedef NTSTATUS (WINAPI *tNtQueryInformationThread)(HANDLE, PVOID, PVOID, ULONG
 // modifications should be placed here...
 typedef struct _modification {
 	struct _modification *next;
+	FuzzFunction *reason;
 	DWORD_PTR Address;
 	char *original_data;
 	int original_size;
@@ -16,3 +17,5 @@ typedef struct _modification {
 	int replace_size;
 } Modification;
 
+Modification *ModificationAdd(DWORD_PTR Address, char *replace, int size);
+Modification *ModificationSearch(DWORD_PTR Address);

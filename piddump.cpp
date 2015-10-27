@@ -23,6 +23,8 @@ DWORD_PTR hdr = 0xFFFFEEEE;
 DWORD_PTR version = 0x01000502;
 DWORD_PTR _pid = 0;
 
+char *dll = NULL;
+
 BOOL  AddDebugPrivilege();
 int StepUpFrame(int PID, HANDLE hThread, DWORD_PTR TID);
 int AddrInExecutable(DWORD_PTR pid, DWORD_PTR Address);
@@ -503,7 +505,7 @@ BOOL PauseThreads(unsigned long pid, bool bResumeThread) {
     // Fill in the size of the structure before using it. 
     te32.dwSize = sizeof(THREADENTRY32); 
 	// Take a snapshot of all threads currently in the system. 
-	hThreadSnap = CreateToolhelp32Snapshot(TH32CS_SNAPTHREAD, 0); 
+	hThreadSnap = CreateToolhelp32Snapshot(TH32CS_SNAPTHREAD, pid); 
     // Walk the thread snapshot to find all threads of the process. 
     // If the thread belongs to the process, add its information 
     // to the display list.
@@ -616,7 +618,43 @@ char *ThreadData(DWORD_PTR *size, DWORD *thread_count) {
 	return ret;
 }
 
-
+BOOL RemoteLibraryFunction( HANDLE hProcess, LPCSTR lpModuleName, LPCSTR lpProcName, LPVOID lpParameters, SIZE_T dwParamSize, PVOID *ppReturn )
+{
+	HANDLE hThread ;
+    LPVOID lpRemoteParams = NULL;
+	DWORD dwOut = 0;
+	
+    LPVOID lpFunctionAddress = GetProcAddress(GetModuleHandleA(lpModuleName), lpProcName);
+    if( !lpFunctionAddress ) lpFunctionAddress = GetProcAddress(LoadLibraryA(lpModuleName), lpProcName);
+    if( !lpFunctionAddress ) goto ErrorHandler;
+	
+    if( lpParameters )
+    {
+        lpRemoteParams = VirtualAllocEx( hProcess, NULL, dwParamSize, MEM_RESERVE|MEM_COMMIT, PAGE_EXECUTE_READWRITE );
+        if( !lpRemoteParams ) goto ErrorHandler;
+		
+        SIZE_T dwBytesWritten = 0;
+        BOOL result = WriteProcessMemory( hProcess, lpRemoteParams, lpParameters, dwParamSize, &dwBytesWritten);
+        if( !result || dwBytesWritten < 1 ) goto ErrorHandler;
+    }
+	
+    hThread = CreateRemoteThread( hProcess, NULL, 0, (LPTHREAD_START_ROUTINE)lpFunctionAddress, lpRemoteParams, NULL, NULL );
+    if( !hThread ) goto ErrorHandler;
+	
+   
+    while(GetExitCodeThread(hThread, &dwOut)) {
+        if(dwOut != STILL_ACTIVE) {
+            *ppReturn = (PVOID)dwOut;
+            break;
+        }
+    }
+	
+    return TRUE;
+	
+ErrorHandler:
+    if( lpRemoteParams ) VirtualFreeEx( hProcess, lpRemoteParams, dwParamSize, MEM_RELEASE );
+    return FALSE;
+}
 
 int main(int argc, char *argv[]) {
 	AddDebugPrivilege();
@@ -624,12 +662,16 @@ int main(int argc, char *argv[]) {
 	// create our structures for the functions that respond with data to the applications we are fuzzing...
 	FuzzySetup();
 	
-	if (argc != 2) {
+	if (argc < 2) {
 		printf("usage: %s pid\n", argv[0]);
 		exit(-1);
 	}
 
 	int pid = atoi(argv[1]);
+	if (argc == 3) {
+		dll = (char *)argv[2];
+	}
+
 	_pid = pid;
 	if ((hProcess = OpenProcess(PROCESS_ALL_ACCESS, 0, pid)) == NULL) {
 		printf("cannot open process %d\n", pid);
@@ -708,11 +750,43 @@ int main(int argc, char *argv[]) {
 		
 		printf("Finished dumping snapshot\n");
 
-		printf("Resume original process..\n");
 
-		PauseThreads(pid, 1);
+		// we're closing FD after resume so the buffering of writing data to disk wont hold anything up...
+		if (dll == NULL) {
+			printf("Resume original process..\n");
+			PauseThreads(pid, 1);
+			fclose(fd);
+		} else {
+			fclose(fd);
+			printf("Injecting PROXY DLL for emulation help\n");
+			/*
+			DWORD old_prot = 0;
+			char *remote_dll_addr = (char *)VirtualAllocEx(hProcess, 0, 4096, MEM_COMMIT|MEM_RESERVE, PAGE_EXECUTE_READWRITE);
+			int inserted = 0;
+			if (remote_dll_addr) {
+				char *dll_name = StrRChr(dll, 0, '\\');
+				dll_name++;
+				inserted = (FindModuleBase(pid, dll_name) != NULL);
+			}
+			// get rva of loadlibrary...
+			printf("Inserted DLL successfully? %d\n", inserted);
+			if (remote_dll_addr == NULL || !inserted) {
+				printf("error allocating space in the remote process.. resuming normally\n");
+				PauseThreads(pid, 1);
+			}*/
+			PVOID lpReturn = NULL;
+			RemoteLibraryFunction( hProcess, "kernel32.dll", "LoadLibraryA", dll, lstrlenA(dll), &lpReturn );
+			HMODULE hInjected = reinterpret_cast<HMODULE>( lpReturn );
+			if (!hInjected) {
+				printf("Couldnt inject..resuming normally\n");
+			} else printf("Successfully injected.. handle %X\n", hInjected);
 
-		fclose(fd);
+			PauseThreads(pid, 1);
+			
+			
+		}
+
+		
 
 		HeapFree(GetProcessHeap(), 0, thread_data);
 		HeapFree(GetProcessHeap(), 0, module_data);
