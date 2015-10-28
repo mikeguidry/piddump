@@ -334,7 +334,7 @@ int FindModuleBase(DWORD_PTR pid, char *module) {
 
 char *MemoryData(DWORD_PTR *size, DWORD_PTR *page_count) {
 	char *ret = NULL;
-	DWORD_PTR mem_size_pages = 0x1000; // start with 16 megabytes of space for pages (roughly with the 4 byte address)
+	DWORD_PTR mem_size_pages = 0x10000; // start with 16 megabytes of space for pages (roughly with the 4 byte address)
 	DWORD_PTR mem_sizes_total = mem_size_pages * 0x1000;
 
 	char *_ptr = (char *)HeapAlloc(GetProcessHeap(), 0, mem_sizes_total);
@@ -411,6 +411,7 @@ char *MemoryData(DWORD_PTR *size, DWORD_PTR *page_count) {
 				DWORD_PTR cur_size = (ptr - _ptr);
 				// if the next page goes over the size.. we need a bigger buffer
 				if ((DWORD_PTR)(cur_size + 0x1000) > mem_sizes_total) {
+					printf("increasing memory total %d need %X\n", mem_sizes_total, cur_size + 0x1000);
 					mem_size_pages += 0x1000; // allocate another 16megs..
 					mem_sizes_total = 0x1000 * mem_size_pages;
 					char *newbuf = (char *)HeapReAlloc(GetProcessHeap(), HEAP_ZERO_MEMORY, _ptr, mem_sizes_total);
@@ -428,7 +429,9 @@ char *MemoryData(DWORD_PTR *size, DWORD_PTR *page_count) {
 				
 
 				CopyMemory(ptr, PageBuffer, BytesRead);
-				if (BytesRead < 0x1000) BytesRead = 0x1000;
+				if (BytesRead < 0x1000) {
+					BytesRead = 0x1000;
+				}
 				ptr += BytesRead;
 				
 				*size = (DWORD_PTR)(ptr - _ptr);
