@@ -292,7 +292,9 @@ int DebugTillReady(DWORD_PTR PID) {
 						
 						if ((mptr = ModificationSearch((DWORD_PTR)DebugEv.u.Exception.ExceptionRecord.ExceptionAddress)) != NULL) {
 							
+							
 							hThread2 = OpenThread(THREAD_ALL_ACCESS, FALSE, DebugEv.dwThreadId);
+							SuspendThread(hThread2);
 
 							ctx.ContextFlags = CONTEXT_FULL;
 							if (GetThreadContext(hThread2, &ctx) == 0) {
@@ -304,6 +306,7 @@ int DebugTillReady(DWORD_PTR PID) {
 							ctx.Eip--;
 							SetThreadContext(hThread2, &ctx);
 							printf("BP @ EIP %X [Function %s <%s>]\n", ctx.Eip, mptr->reason->module_name, mptr->reason->function_name);
+							printf("ESP: %X EBP: %X\n", ctx.Esp, ctx.Ebp);
 
 
 							Modification_Undo((DWORD_PTR)DebugEv.u.Exception.ExceptionRecord.ExceptionAddress);
