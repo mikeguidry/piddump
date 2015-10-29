@@ -597,11 +597,11 @@ char *PageVerify(DWORD_PTR Address, int Size, DWORD_PTR *ret_size) {
 
 
 
-char *MemoryData(DWORD_PTR *size, DWORD_PTR *page_count) {
+char *MemoryData(DWORD_PTR *size, DWORD_PTR *page_count, int snapshot_count) {
 	char *ret = NULL;
 	DWORD_PTR mem_size_pages = 0x10000; // start with 16 megabytes of space for pages (roughly with the 4 byte address)
 	DWORD_PTR mem_sizes_total = mem_size_pages * 0x1000;
-	int first = (memory_data_first++ == 0);
+	int first = (snapshot_count == 0) ? 1 : 0;
 
 	char *_ptr = (char *)HeapAlloc(GetProcessHeap(), 0, mem_sizes_total);
 	if (_ptr == NULL) {
@@ -676,7 +676,7 @@ char *MemoryData(DWORD_PTR *size, DWORD_PTR *page_count) {
 				
 				DWORD_PTR cur_size = (ptr - _ptr);
 				// if the next page goes over the size.. we need a bigger buffer
-				if ((DWORD_PTR)(cur_size + (sizeof(DWORD_PTR) + 1 + 0x1000)) > mem_sizes_total) {
+				if ((DWORD_PTR)(cur_size + (sizeof(DWORD_PTR) + 0x1000)) > mem_sizes_total) {
 					printf("increasing memory total %d need %X\n", mem_sizes_total, cur_size + 0x1000);
 					mem_size_pages += 0x1000; // allocate another 16megs..
 					mem_sizes_total = 0x1000 * mem_size_pages;
@@ -691,16 +691,16 @@ char *MemoryData(DWORD_PTR *size, DWORD_PTR *page_count) {
 
 				char *verify_ret = NULL;
 				DWORD_PTR verify_size = 0;
-				if (!first) {
+				if (first == 0) {
 					// now lets verify the crc against our first snapshot...
 					verify_ret = PageVerify((DWORD_PTR)Addr, BytesRead, &verify_size);
 
 				}
 
 
-				if (first && !verify_ret) {
+				if (first) {
 					// type = 1 (original snapshot..)
-					*ptr++ = 1;
+					//*ptr++ = 1;
 
 					DWORD_PTR *DataAddr = (DWORD_PTR *)ptr;
 					*DataAddr = (DWORD_PTR)Addr;
@@ -715,7 +715,7 @@ char *MemoryData(DWORD_PTR *size, DWORD_PTR *page_count) {
 					
 				} else {
 					// type = 2 (relates to original snapshot)
-					*ptr++ = 2;
+					//*ptr++ = 2;
 
 					DWORD_PTR *VerifySize = (DWORD_PTR *)ptr;
 					*VerifySize = verify_size;
@@ -1088,11 +1088,11 @@ int main(int argc, char *argv[]) {
 			printf("Dump memory to snapshot\n");
 			DWORD memory_data_size = 0;
 			DWORD memory_page_count = 0;
-			char *memory_data = MemoryData(&memory_data_size, &memory_page_count);
+			char *memory_data = MemoryData(&memory_data_size, &memory_page_count, snapshot_count);
 			printf("Memory Dump Size %d PTR %X\n", memory_data_size, memory_data);
 
 			char fname[1024];
-			wsprintf(fname, "z:\\shared\\dump\\%d_%d_snapshot.dat", pid, snapshot_count);
+			wsprintf(fname, "dump\\%d_%d_snapshot.dat", pid, snapshot_count);
 			
 			
 			printf("Writing data to disk as '%s'\n", fname);		
