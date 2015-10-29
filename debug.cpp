@@ -100,12 +100,42 @@ Modification *ModificationSearch(DWORD_PTR Address) {
 }
 
 
+int Modification_Redo(DWORD_PTR Address) {
+	Modification *mptr = ModificationSearch(Address);
+	
+	if (mptr != NULL) {
+		DWORD old_prot = 0;
+		
+		printf("replacing original\n");
+		VirtualProtectEx(hProcess, (LPVOID) Address, mptr->replace_size, PAGE_EXECUTE_READWRITE, &old_prot);
+		
+		DWORD rw_count = 0;
+		// we need to pause the process at this moment..
+		WriteProcessMemory(hProcess, (void *) Address, mptr->replace_data, 1, &rw_count);
+		printf("wrote %d bytes to %X\n", rw_count, Address);
+		FlushInstructionCache(hProcess, (const void *)Address, mptr->replace_size);
+		VirtualProtectEx(hProcess, (LPVOID) Address, mptr->replace_size, old_prot, &old_prot);
+		
+		return 1;
+	}
+	
+	return 0;
+
+}
+
+void Modifications_Redo() {
+	Modification *mptr = mod_list;
+	while (mptr != NULL) {
+		Modification_Redo(mptr->Address);
+		mptr = mptr->next;
+	}
+}
 
 
 int Modification_Undo(DWORD_PTR Address) {
 	Modification *mptr = ModificationSearch(Address);
 
-	if (mptr != NULL) {
+	if (mptr != NULL && !mptr->undo) {
 		DWORD old_prot = 0;
 
 		printf("replacing original\n");
@@ -117,6 +147,8 @@ int Modification_Undo(DWORD_PTR Address) {
 		printf("wrote %d bytes to %X\n", rw_count, Address);
 		FlushInstructionCache(hProcess, (const void *)Address, mptr->original_size);
 		VirtualProtectEx(hProcess, (LPVOID) Address, mptr->original_size, old_prot, &old_prot);
+
+		mptr->undo = 1;
 
 		return 1;
 	}

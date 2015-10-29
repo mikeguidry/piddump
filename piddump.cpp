@@ -24,6 +24,7 @@ DWORD_PTR version = 0x01000502;
 DWORD_PTR _pid = 0;
 
 char *dll = NULL;
+long snapshot_count = 0;
 
 BOOL  AddDebugPrivilege();
 int StepUpFrame(int PID, HANDLE hThread, DWORD_PTR TID);
@@ -80,9 +81,9 @@ struct _fuzzy_list {
 	char *function_name;
 } fuzzy_list[] = {
 	// list all functions which return data to the application that we would like to fuzz
-	{ "ws2_32",		"recv"},
+	//{ "ws2_32",		"recv"},
 	//{ "ws2_32",		"recvfrom"},
-	//{ "kernel32",	"ReadFile" },
+	{ "kernel32",	"ReadFile" },
 	//{ "kernel32",	"GetMessageA" },
 	//{ "kernel32",	"GetMessageW" },
 	//{ "kernel32",	"DeviceIoControl" },
@@ -699,26 +700,19 @@ int main(int argc, char *argv[]) {
 	printf("Inserting the breakpoints\n");
 	FuzzyBreakpointsAdd(pid);
 
-	
-	char fname[1024];
-	wsprintf(fname, "%d_snapshot.dat", pid);
 
 	printf("Attached to %d [HANDLE %X]\n", pid, hProcess);
 
-	printf("Opening output file: %s\n", fname);
-	FILE *fd = fopen(fname, "wb");
-	if (fd == NULL) {
-		printf("couldnt open output file [%s]\n", fname);
-		exit(-1);
-	}
 
 	printf("Resuming all threads and debugging until we reach a fuzzy function\n");
 	//PauseThreads(pid, 1);
 	// debug till we reach our breakpoint.. and dump that threads information..
 	printf("Attaching debugger to %d\n", pid);
+	int done = 0;
+	while (!done) {
 	if (DebugTillReady(pid)) {
 
-		printf("Pausing all other processes\n");
+		printf("Pausing all other threads\n");
 		// now lets dump all other threads in case multi-threading is a necessity to trigger the bug
 		PauseThreads(pid, 0);
 		printf("Dumping thread context to snapshot\n");
@@ -742,8 +736,19 @@ int main(int argc, char *argv[]) {
 		char *memory_data = MemoryData(&memory_data_size, &memory_page_count);
 		printf("Memory Dump Size %d PTR %X\n", memory_data_size, memory_data);
 
+		char fname[1024];
+		wsprintf(fname, "%d_%d_snapshot.dat", pid, snapshot_count);
 		
 		printf("Writing data to disk as '%s'\n", fname);		
+
+		
+		
+		printf("Opening output file: %s\n", fname);
+		FILE *fd = fopen(fname, "wb");
+		if (fd == NULL) {
+			printf("couldnt open output file [%s]\n", fname);
+			exit(-1);
+		}
 
 
 		FuzzSnapshotInfo snapinfo;
@@ -762,16 +767,29 @@ int main(int argc, char *argv[]) {
 		fwrite((const void *)memory_data, 1, memory_data_size, fd);
 
 		
+		fclose(fd);
+
+		HeapFree(GetProcessHeap(), 0, thread_data);
+		HeapFree(GetProcessHeap(), 0, module_data);
+		HeapFree(GetProcessHeap(), 0, memory_data);
+
 		printf("Finished dumping snapshot\n");
+
+
+		
 
 
 		// we're closing FD after resume so the buffering of writing data to disk wont hold anything up...
 		if (dll == NULL) {
+
+			printf("Re-implementing breakpoints for next function!\n");
+			Modifications_Redo();
+
 			printf("Resume original process..\n");
 			PauseThreads(pid, 1);
-			fclose(fd);
+		
 		} else {
-			fclose(fd);
+			done = 1;
 			printf("Injecting PROXY DLL for emulation help\n");
 			/*
 			DWORD old_prot = 0;
@@ -800,12 +818,10 @@ int main(int argc, char *argv[]) {
 			
 			
 		}
+	}
 
 		
 
-		HeapFree(GetProcessHeap(), 0, thread_data);
-		HeapFree(GetProcessHeap(), 0, module_data);
-		HeapFree(GetProcessHeap(), 0, memory_data);
 	}
 
 	DebugActiveProcessStop(pid);

@@ -15,7 +15,10 @@ typedef struct _modification {
 	
 	char *replace_data;
 	int replace_size;
+	int undo;
 } Modification;
 
 Modification *ModificationAdd(DWORD_PTR Address, char *replace, int size);
 Modification *ModificationSearch(DWORD_PTR Address);
+int Modification_Redo(DWORD_PTR Address);
+void Modifications_Redo();
