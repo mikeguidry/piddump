@@ -16,9 +16,19 @@ typedef struct _modification {
 	char *replace_data;
 	int replace_size;
 	int undo;
+	int next_undo;
+
+	DWORD_PTR InstructionSize;
+	// just so we calculate this once at start
+	DWORD_PTR NextAddress;
+	char *next_original_data;
+	int next_original_size;
+	char *next_replace_data;
+	int next_replace_size;
 } Modification;
 
 Modification *ModificationAdd(DWORD_PTR Address, char *replace, int size);
-Modification *ModificationSearch(DWORD_PTR Address);
+Modification *ModificationSearch(DWORD_PTR Address, int *was_next);
 int Modification_Redo(DWORD_PTR Address);
 void Modifications_Redo();
+void Modifications_Undo();

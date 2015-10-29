@@ -8,8 +8,14 @@
 #include "structures.h"
 #include "debug.h"
 
+// *** FIX: remove udis86 (add as library so we dont have to share with the licensing)
+#include "udis86/udis86.h"
+
 #pragma comment(lib, "dbghelp.lib")
 #pragma comment(lib, "shlwapi.lib")
+
+
+extern long injected;
 
 // hProcess global from other C file.. we'll remove globals later.. oh well
 extern HANDLE hProcess;
@@ -50,6 +56,61 @@ DWORD_PTR WINAPI GetThreadStartAddress(HANDLE hProcess, HANDLE hThread) {
 }
 
 
+// how many bytes do we disassemble per loop?
+#define BYTES_PER_DISASM_LOOP 13
+
+// get the size of a function by disassembling it until the return
+int Disasm(DWORD_PTR FuncAddr, char *asmbuf) {
+	int size = 0;
+	
+	// initialize disassembler
+	ud_t ud_obj;
+	ud_init(&ud_obj);
+	unsigned char data[BYTES_PER_DISASM_LOOP];
+	
+#ifndef _WIN64
+	ud_set_mode(&ud_obj, 32);
+#else
+	ud_set_mode(&ud_obj, 64);
+#endif
+	ud_set_syntax(&ud_obj, UD_SYN_INTEL);
+	
+	unsigned char *Data = (unsigned char *)FuncAddr;
+	
+	DWORD_PTR Addr = (DWORD_PTR)FuncAddr;
+	int len = 0;
+	int bytes_to_disasm = BYTES_PER_DISASM_LOOP;
+	
+	while (1) {
+		bytes_to_disasm = 13;
+		//if (Addr >= ModuleEnd || bytes_to_disasm+Addr >= ModuleEnd) { size = 0; break; }
+		
+		ud_set_pc(&ud_obj, (unsigned __int64)Addr);
+		
+		// copy the instruction at Data (13 bytes max.. found this constant somewhere.. maybe up to ~21 on some 64bit, or vm-capable code)
+		memcpy(&data, Data, BYTES_PER_DISASM_LOOP);
+		ud_set_input_buffer(&ud_obj, (uint8_t*)data, BYTES_PER_DISASM_LOOP);
+		
+		// disassemble and turn into ascii
+		if ((len = ud_disassemble(&ud_obj)) <= 0) { size = 0; break; }
+		char *asm_text = (char *)ud_insn_asm(&ud_obj);
+		
+		if(asmbuf != NULL) {
+			lstrcpy(asmbuf, asm_text);
+		}
+		size += len;
+		
+		printf("%s\n", asm_text);
+		//if (StrStrI(asm_text, "ret") != NULL) break;
+		
+		Data += size;
+		Addr += size;
+		
+		break;
+	}
+	
+	return size;
+}
 
 
 Modification *ModificationAdd(DWORD_PTR Address, char *replace, int size) {
@@ -63,16 +124,31 @@ Modification *ModificationAdd(DWORD_PTR Address, char *replace, int size) {
 	mptr->replace_data = (char *)HeapAlloc(GetProcessHeap(), 0, size);
 	mptr->original_size = mptr->replace_size = size;
 
+	mptr->next_original_data = (char *)HeapAlloc(GetProcessHeap(), 0, size);
+	mptr->next_replace_data  = (char *)HeapAlloc(GetProcessHeap(), 0, size);
+	mptr->next_original_size = mptr->next_replace_size = size;
+
+	// now we need the address of the NEXT function (so we can continously hook & dump the software being fuzzed)
+	int instruction_len = Disasm(Address, NULL);
+	if (instruction_len != 0) {
+		mptr->InstructionSize = instruction_len;
+		mptr->NextAddress = (Address + instruction_len);
+	} else {
+		printf("couldnt disassemble instruction!\n");
+	}
+
 	CopyMemory(mptr->replace_data, replace, size);
+	CopyMemory(mptr->next_replace_data, replace, size);
 
 	DWORD rw_count = 0;
 	ReadProcessMemory(hProcess,(const void *) Address, mptr->original_data, size, &rw_count);
+	ReadProcessMemory(hProcess,(const void *) (Address + mptr->InstructionSize), mptr->next_original_data, size, &rw_count);
 
 	DWORD old_prot = 0;
 	VirtualProtectEx(hProcess, (LPVOID) Address, size, PAGE_EXECUTE_READWRITE, &old_prot);
 
 	// we need to pause the process at this moment!
-	WriteProcessMemory(hProcess, ( void *) Address, mptr->replace_data, 1, &rw_count);
+	WriteProcessMemory(hProcess, ( void *) Address, mptr->replace_data, size, &rw_count);
 
 	FlushInstructionCache(hProcess, (const void *)Address, size);
 
@@ -88,11 +164,19 @@ Modification *ModificationAdd(DWORD_PTR Address, char *replace, int size) {
 
 
 
-Modification *ModificationSearch(DWORD_PTR Address) {
+Modification *ModificationSearch(DWORD_PTR Address, int *was_next) {
 	Modification *mptr = mod_list;
 
 	while (mptr != NULL) {
-		if (mptr->Address == Address) return mptr;
+		if (mptr->NextAddress == Address) {
+			if (was_next != NULL)
+				*was_next = 1;
+			return mptr;
+		} else {
+			if (mptr->Address == Address) {
+				return mptr;
+			}
+		}
 		mptr = mptr->next;
 	}
 
@@ -100,21 +184,35 @@ Modification *ModificationSearch(DWORD_PTR Address) {
 }
 
 
-int Modification_Redo(DWORD_PTR Address) {
-	Modification *mptr = ModificationSearch(Address);
+int Modification_Redo(DWORD_PTR Address, int next) {
+	int was_next = 0;
+	Modification *mptr = ModificationSearch(Address, next ? &was_next : NULL);
 	
+	printf("Modification Redo: %X next: %d\n", Address, next);
 	if (mptr != NULL) {
-		DWORD old_prot = 0;
-		
-		printf("replacing original\n");
-		VirtualProtectEx(hProcess, (LPVOID) Address, mptr->replace_size, PAGE_EXECUTE_READWRITE, &old_prot);
-		
+		printf("not found!\n");
+		DWORD old_prot = 0;		
 		DWORD rw_count = 0;
-		// we need to pause the process at this moment..
-		WriteProcessMemory(hProcess, (void *) Address, mptr->replace_data, 1, &rw_count);
-		printf("wrote %d bytes to %X\n", rw_count, Address);
-		FlushInstructionCache(hProcess, (const void *)Address, mptr->replace_size);
-		VirtualProtectEx(hProcess, (LPVOID) Address, mptr->replace_size, old_prot, &old_prot);
+
+		int prot_size = mptr->InstructionSize + mptr->next_replace_size;
+		printf("Setting BP: %X [next? %d]\n",
+			Address, next);
+
+		VirtualProtectEx(hProcess, (LPVOID) Address, prot_size, PAGE_EXECUTE_READWRITE, &old_prot);
+
+		if (!next) {
+			WriteProcessMemory(hProcess, (void *) mptr->Address, mptr->replace_data, mptr->replace_size, &rw_count);
+			mptr->undo = 0;
+		} else {
+			printf("BP at NEXT: %X\n", mptr->NextAddress);
+			WriteProcessMemory(hProcess, (void *) mptr->NextAddress, mptr->next_replace_data, mptr->next_replace_size, &rw_count);
+			mptr->next_undo = 0;
+		}
+
+		VirtualProtectEx(hProcess, (LPVOID) Address, prot_size, old_prot, &old_prot);
+
+		FlushInstructionCache(hProcess, (const void *)Address, prot_size);
+		
 		
 		return 1;
 	}
@@ -123,38 +221,62 @@ int Modification_Redo(DWORD_PTR Address) {
 
 }
 
+
+
+// for now.. we work with having the instruction size..
+// we need to single step otherwise but i wasnt having much success with this new engine
+int Modification_Undo(DWORD_PTR Address, int hook_next) {
+	Modification *mptr = ModificationSearch(Address, NULL);
+
+	if (mptr != NULL && !mptr->undo) {
+		DWORD old_prot = 0;
+		DWORD rw_count = 0;
+
+		printf("Remove BP @ %X [next? %d]\n", Address, hook_next);
+		VirtualProtectEx(hProcess, (LPVOID) Address, mptr->InstructionSize + mptr->next_replace_size, PAGE_EXECUTE_READWRITE, &old_prot);
+		if (!hook_next) {
+			// we need to pause the process at this moment..
+			WriteProcessMemory(hProcess, (void *) Address, mptr->original_data, mptr->original_size, &rw_count);
+			mptr->undo = 1;
+		} else {
+			// we need to pause the process at this moment..
+			WriteProcessMemory(hProcess, (void *) mptr->NextAddress, mptr->next_original_data, mptr->next_original_size, &rw_count);
+			mptr->next_undo = 1;
+		}
+		
+		VirtualProtectEx(hProcess, (LPVOID) Address, mptr->InstructionSize + mptr->next_replace_size, old_prot, &old_prot);
+
+		FlushInstructionCache(hProcess, (const void *)mptr->Address, mptr->InstructionSize + mptr->next_replace_size);
+
+		return 1;
+	}
+
+	return 0;
+}
+
+
+
+// redo all
 void Modifications_Redo() {
 	Modification *mptr = mod_list;
 	while (mptr != NULL) {
-		Modification_Redo(mptr->Address);
+		Modification_Redo(mptr->Address, 0);
+
 		mptr = mptr->next;
 	}
 }
 
+// undo all
+void Modifications_Undo() {
+	Modification *mptr = mod_list;
+	while (mptr != NULL) {
+		Modification_Undo(mptr->Address, 0);
+		Modification_Undo(mptr->Address, 1);
 
-int Modification_Undo(DWORD_PTR Address) {
-	Modification *mptr = ModificationSearch(Address);
-
-	if (mptr != NULL && !mptr->undo) {
-		DWORD old_prot = 0;
-
-		printf("replacing original\n");
-		VirtualProtectEx(hProcess, (LPVOID) Address, mptr->original_size, PAGE_EXECUTE_READWRITE, &old_prot);
-
-		DWORD rw_count = 0;
-		// we need to pause the process at this moment..
-		WriteProcessMemory(hProcess, (void *) Address, mptr->original_data, 1, &rw_count);
-		printf("wrote %d bytes to %X\n", rw_count, Address);
-		FlushInstructionCache(hProcess, (const void *)Address, mptr->original_size);
-		VirtualProtectEx(hProcess, (LPVOID) Address, mptr->original_size, old_prot, &old_prot);
-
-		mptr->undo = 1;
-
-		return 1;
+		mptr = mptr->next;
 	}
-
-	return 0;
 }
+
 
 
 BOOL  AddDebugPrivilege() { 
@@ -250,13 +372,14 @@ int AddrInExecutable(DWORD_PTR pid, DWORD_PTR Address) {
 	return ret;
 }
 
-
-
+BOOL DoneOnce = FALSE;
+void InjDLL();
+extern long inject_dll;
 
 // each thread has to be stepped out of any windows DLLs or other DLLs...
 // so we can hook and redirect those to API proxy or a simulation..
 //int StepUpFrame(int PID, HANDLE hThread, DWORD_PTR TID) {
-int DebugTillReady(DWORD_PTR PID) {
+int DebugTillReady(DWORD_PTR PID, int next, int *do_we_dump) {
 	Modification *mptr = NULL;
 	printf("\n----\nDebug Till Ready\n");	
 	// get threads context..
@@ -264,28 +387,26 @@ int DebugTillReady(DWORD_PTR PID) {
 	int ret = 0;
 	CONTEXT ctx;
 	DWORD dwContinueStatus = DBG_CONTINUE;
-
 	HANDLE hThread2;
+	int was_next = 0;
+	DWORD_PTR BreakAddr = 0;
 
 	
 	DebugActiveProcess(PID);
 
 	
-	BOOL DoneOnce = FALSE;
+	
 	int done = 0;
 	int count = 0;
-	while (!done) {
-		
-		// now lets connect a debugger and step until a breakpoint
-		if (WaitForDebugEvent(&DebugEv, INFINITE) == 0) {
-			//if (count++ > 4) break;
-			//DebugBreakProcess(hProcess);
-			//continue;
-			//break;
-			//return -1;
-		}
+	while (!done && !InterlockedExchangeAdd(&injected, 0)) {
 
-		//printf("LOOP\n");
+		int wf = WaitForDebugEvent(&DebugEv, 5000);
+		if (InterlockedExchangeAdd(&inject_dll, 0)) {
+			ContinueDebugEvent(DebugEv.dwProcessId, DebugEv.dwThreadId, dwContinueStatus);
+			return 0;
+		}
+		if (wf == 0) continue;
+
 
 		char ebuf[1024];
 		//printf("debug event code %d proc %X thread %X [%X]\n", DebugEv.dwDebugEventCode, DebugEv.dwDebugEventCode, DebugEv.dwProcessId, TID);
@@ -320,11 +441,28 @@ int DebugTillReady(DWORD_PTR PID) {
 							break;
 						}
 
+						BreakAddr = (DWORD_PTR)DebugEv.u.Exception.ExceptionRecord.ExceptionAddress;
 
+						if (next) {
+							// first lets see if this is the next instruction after a fuzzy function (in which case we remove it and re-breakpoint the original)
+							// until i get single stepping working properly with this debugger (it might be CONTEXT flags.. shrug)
+							mptr = ModificationSearch((DWORD_PTR)BreakAddr, &was_next);
+
+							printf("first next search for %X -> mptr %X was_next %d\n", BreakAddr, mptr, was_next);
+						}
+
+						// now lets see if this address is a hooked function..
+						if (mptr == NULL) {
+							mptr = ModificationSearch((DWORD_PTR)BreakAddr, NULL);
+
+							printf("second search for %X -> mptr %X was_next %d\n", BreakAddr, mptr, was_next);
+						}
 						
-						if ((mptr = ModificationSearch((DWORD_PTR)DebugEv.u.Exception.ExceptionRecord.ExceptionAddress)) != NULL) {
-							
-							
+						
+						if (mptr != NULL) {	
+							printf("MPTR FOUND %X : Mptr Addy %X Next %X\n", 
+								BreakAddr, mptr->Address, mptr->NextAddress);
+
 							hThread2 = OpenThread(THREAD_ALL_ACCESS, FALSE, DebugEv.dwThreadId);
 							SuspendThread(hThread2);
 
@@ -334,28 +472,46 @@ int DebugTillReady(DWORD_PTR PID) {
 								return -1;
 							}
 							
-							// since we had the breakpoint.. we have to reverse the EIP
-							ctx.Eip--;
-							SetThreadContext(hThread2, &ctx);
 							printf("BP @ EIP %X [Function %s <%s>]\n", ctx.Eip, mptr->reason->module_name, mptr->reason->function_name);
 							printf("ESP: %X EBP: %X\n", ctx.Esp, ctx.Ebp);
 
+							ctx.Eip = (was_next) ? mptr->NextAddress : mptr->Address;
+							// since we had the breakpoint.. we have to reverse the EIP
+							//ctx.Eip--;
+							SetThreadContext(hThread2, &ctx);
+							
 
-							Modification_Undo((DWORD_PTR)DebugEv.u.Exception.ExceptionRecord.ExceptionAddress);
-							// *** We have to redo the breakpoint after we dump!!! I suggest breakpointing the next instruction..
-							// continuing the thread and then setting the original... and then move forward... 
-							// one step at a time.. lets fuzz the first hit of the first time first :)
+							printf("Undo %X was_next %d\n", BreakAddr, was_next);
+							// undo the breakpoint (whether it was next, or original)..
+							Modification_Undo((DWORD_PTR)BreakAddr, was_next);
 
+							printf("Redo %X was_next %d\n", BreakAddr, was_next == 0);
+
+							if (next) {
+								// now if we want to continue to process (next variable) we want to set that breakpoint at the next instruction, or the original...
+								Modification_Redo((DWORD_PTR)BreakAddr, was_next == 0);
+
+								ResumeThread(hThread2);
+							}
+
+							
 							CloseHandle(hThread2);
+							
 
-							// take all thread information before execution resumes
-							IndexThreads(PID);
+							if (!was_next) {
+								printf("We hit a fuzzed function breakpoint.  Returning so we can dump the data...\n");
 
-							printf("We hit a fuzzed function breakpoint.  Returning so we can dump the data...\n");
+								// take all thread information before execution resumes
+								IndexThreads(PID);
+								*do_we_dump = 1;
+							} else {
+								*do_we_dump = 0;
+							}
+
+							// so we know the process is ready to return to calling function...
 							ret = 1;
 							done = 1;
-							
-							break;
+
 						}
 						break;
 
@@ -412,9 +568,6 @@ int DebugTillReady(DWORD_PTR PID) {
 	}
 
 	
-	DebugActiveProcessStop(PID);
-
-	printf("Detached debugger from PID %X\n", PID);	
 
 	
 	return ret;

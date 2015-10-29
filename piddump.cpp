@@ -19,6 +19,8 @@ NOTICE: a bit of this code has been grabbed from other places.. although ive wri
 #pragma comment(lib, "dbghelp.lib")
 #pragma comment(lib, "shlwapi.lib")
 
+long injected = 0;
+long inject_dll = 0;
 DWORD_PTR hdr = 0xFFFFEEEE;
 DWORD_PTR version = 0x01000502;
 DWORD_PTR _pid = 0;
@@ -30,7 +32,7 @@ BOOL  AddDebugPrivilege();
 int StepUpFrame(int PID, HANDLE hThread, DWORD_PTR TID);
 int AddrInExecutable(DWORD_PTR pid, DWORD_PTR Address);
 DWORD_PTR RemoteDerefDWORD(DWORD_PTR Address);
-int DebugTillReady(DWORD_PTR);
+int DebugTillReady(DWORD_PTR, int, int *);
 int FindModuleBase(DWORD_PTR pid, char *module);
 
 
@@ -81,8 +83,9 @@ struct _fuzzy_list {
 	char *function_name;
 } fuzzy_list[] = {
 	// list all functions which return data to the application that we would like to fuzz
-	//{ "ws2_32",		"recv"},
+	{ "ws2_32",		"recv"},
 	//{ "ws2_32",		"recvfrom"},
+	{ "wininet", "InternetReadFile" },
 	{ "kernel32",	"ReadFile" },
 	//{ "kernel32",	"GetMessageA" },
 	//{ "kernel32",	"GetMessageW" },
@@ -181,7 +184,8 @@ int ThreadAdd(DWORD_PTR ThreadID) {
 		CloseHandle(hThread);
 		return -1;
 	}
-	if (!AddrInExecutable(_pid, ctx.Eip)) {
+	if (!AddrInExecutable(_pid, ctx.Eip) && 1==0) {
+		printf("Addr not in exe! %X\n", ctx.Eip);
 			CloseHandle(hThread);
 			return 0;
 	}
@@ -225,7 +229,7 @@ int ThreadAdd(DWORD_PTR ThreadID) {
 					CopyMemory(&tinfo->ctx_segments, &tinfo->ctx, sizeof(CONTEXT));
 					ResolveSegs(hThread, &tinfo->ctx_segments);
 				
-					Modification *modptr = ModificationSearch(ctx.Eip);
+					Modification *modptr = ModificationSearch(ctx.Eip, NULL);
 					if (modptr != NULL) {
 						tinfo->fuzz = 1;
 						
@@ -332,11 +336,272 @@ int FindModuleBase(DWORD_PTR pid, char *module) {
 	return ret;
 }
 
+#define WIN32_LEAN_AND_MEAN
+
+/*
+ * efone - Distributed internet phone system.
+ *
+ * (c) 1999,2000 Krzysztof Dabrowski
+ * (c) 1999,2000 ElysiuM deeZine
+ *
+ * This program is free software; you can redistribute it and/or
+ * modify it under the terms of the GNU General Public License
+ * as published by the Free Software Foundation; either version
+ * 2 of the License, or (at your option) any later version.
+ *
+ */
+
+/* based on implementation by Finn Yannick Jacobs */
+
+#include <stdio.h>
+#include <stdlib.h>
+
+/* crc_tab[] -- this crcTable is being build by chksum_crc32GenTab().
+ *		so make sure, you call it before using the other
+ *		functions!
+ */
+unsigned int crc_tab[256];
+
+/* chksum_crc() -- to a given block, this one calculates the
+ *				crc32-checksum until the length is
+ *				reached. the crc32-checksum will be
+ *				the result.
+ */
+unsigned int chksum_crc32 (unsigned char *block, unsigned int length)
+{
+   register unsigned long crc;
+   unsigned long i;
+
+   crc = 0xFFFFFFFF;
+   for (i = 0; i < length; i++)
+   {
+      crc = ((crc >> 8) & 0x00FFFFFF) ^ crc_tab[(crc ^ *block++) & 0xFF];
+   }
+   return (crc ^ 0xFFFFFFFF);
+}
+
+/* chksum_crc32gentab() --      to a global crc_tab[256], this one will
+ *				calculate the crcTable for crc32-checksums.
+ *				it is generated to the polynom [..]
+ */
+
+void chksum_crc32gentab ()
+{
+   unsigned long crc, poly;
+   int i, j;
+
+   poly = 0xEDB88320L;
+   for (i = 0; i < 256; i++)
+   {
+      crc = i;
+      for (j = 8; j > 0; j--)
+      {
+	 if (crc & 1)
+	 {
+	    crc = (crc >> 1) ^ poly;
+	 }
+	 else
+	 {
+	    crc >>= 1;
+	 }
+      }
+      crc_tab[i] = crc;
+   }
+}
+
+
+
+typedef struct _region_crc {
+	DWORD_PTR Addr;
+	unsigned int *crc;
+	DWORD_PTR Size;
+} RegionCRC;
+
+#define REGION_BLOCK sizeof(DWORD_PTR)
+
+RegionCRC *CRC_Region(DWORD_PTR Addr, DWORD_PTR Size);
+char *CRC_Verify(RegionCRC *region, DWORD_PTR *Size, int);
+void RegionFree(RegionCRC **rptr);
+
+RegionCRC *CRC_Region(DWORD_PTR Addr, DWORD_PTR Size) {
+	RegionCRC *cptr = NULL;
+	int crc_count = Size / REGION_BLOCK;
+	
+	char ebuf[1024];
+	wsprintf(ebuf, "Region Verify crc Addr %X Size %d count %d\r\n", Addr, Size, crc_count);
+	OutputDebugString(ebuf);
+	
+	cptr = (RegionCRC *)HeapAlloc(GetProcessHeap(), HEAP_ZERO_MEMORY, sizeof(RegionCRC));
+	if (cptr == NULL) {
+		__asm int 3
+			return NULL;
+	}
+	
+	cptr->Size = Size;
+	cptr->crc = (unsigned int *)HeapAlloc(GetProcessHeap(), HEAP_ZERO_MEMORY, sizeof(unsigned int) * (crc_count + 1) + 1);
+	if (cptr->crc == NULL) {
+		__asm int 3
+			return NULL;
+	}
+	cptr->Addr = Addr;
+	
+	for (int i = 0; i < crc_count; i++) {
+		unsigned char *ptr = (unsigned char *)((unsigned char *)Addr + (i * REGION_BLOCK));
+		
+		cptr->crc[i] = chksum_crc32(ptr, REGION_BLOCK);
+		//wsprintf(ebuf, "crc %X\r\n", cptr->crc[i]);
+		//OutputDebugString(ebuf);
+	}
+	
+	
+	return cptr;
+}
+
+// optimize this later! no need to do the crc checks twice.. tired and lazy tonight
+char *CRC_Verify(RegionCRC *region, DWORD_PTR *Size, int to_push) {
+	int crc_count = region->Size / REGION_BLOCK;
+	int modified = 0;
+	char *ret = NULL;
+	unsigned char *ptr = NULL;
+	char ebuf[1024];
+	
+	for (int i = 0; i < crc_count; i++) {
+		ptr = (unsigned char *)((unsigned char *)region->Addr + (i * REGION_BLOCK));
+		unsigned int chk = chksum_crc32(ptr, REGION_BLOCK);
+		if (chk != region->crc[i]) modified++;
+	}
+	
+	
+	wsprintf(ebuf, "Region check crc Addr %X Size %d count %d modified = %d\r\n", region->Addr, region->Size, crc_count, modified);
+	OutputDebugString(ebuf);
+	
+	
+	if (modified > 0) {
+		char *mptr = NULL, *ret = NULL;
+	
+		if (!to_push) {
+			mptr = ret = (char *)HeapAlloc(GetProcessHeap(), HEAP_ZERO_MEMORY, (((sizeof(DWORD_PTR) * modified) + (REGION_BLOCK * modified))) + 1);
+			if (ret == NULL) return NULL;
+		}
+		for (int i = 0; i < crc_count; i++) {
+			ptr = (unsigned char *)((unsigned char *)region->Addr + (i * REGION_BLOCK));
+			
+			unsigned int chk = chksum_crc32((unsigned char *)ptr, REGION_BLOCK);
+			if (chk != region->crc[i]) {
+				if (!to_push) {
+					// copy the data a dword at a time starting with the address to be returned to the caller...
+					DWORD_PTR *mAddr = (DWORD_PTR *)mptr;
+					mptr += sizeof(DWORD_PTR);
+					DWORD_PTR *mData = (DWORD_PTR *)mptr;
+					mptr += REGION_BLOCK;
+					
+					// copy this block of data
+					*mAddr = (DWORD_PTR)ptr;
+					//CopyMemory(mData, ptr, REGION_BLOCK);
+					*mData = *(DWORD_PTR *)(ptr);				
+				} else {
+				}
+			}
+		}
+		
+		//wsprintf(ebuf, "DATA MODS: %d\r\n", modified);
+		//OutputDebugString(ebuf);
+		
+		if (!to_push) {
+			*Size = (DWORD_PTR)((char *)mptr - ret);
+		}
+		return ret;
+	} else {
+		//OutputDebugString("NO MODS\r\n");
+	}
+	//*Size = 0;
+	return NULL;
+}
+
+void RegionFree(RegionCRC **rptr) {
+	if (*rptr != NULL) {
+		RegionCRC *_rptr = *rptr;
+		HeapFree(GetProcessHeap(), 0, _rptr->crc);
+		HeapFree(GetProcessHeap(), 0, _rptr);
+		*rptr = NULL;
+	}
+}
+
+
+// this is where we will hold the initial snapshot.. so all of the seq. can be much smaller and hopefully faster
+// to dump..it would be great to offload this to another machine using ZeroMQ.. and a ton faster than writing locally to disk
+
+typedef struct _compare_memory {
+	struct _compare_memory *next;
+	DWORD_PTR Address;
+	char *Data;
+	int Size;
+	RegionCRC *RegionVerify;
+} CompareMemory;
+
+CompareMemory *compare_list = NULL;
+
+int memory_data_first = 0;
+
+CompareMemory *compare_find(DWORD_PTR Address) {
+	CompareMemory *cptr = compare_list;
+	while (cptr != NULL) {
+		if (cptr->Address == Address) {
+			return cptr;
+		}
+		cptr = cptr->next;
+	}
+	return NULL;
+}
+
+CompareMemory *compare_add(DWORD_PTR Address, char *Data, int Size) {
+	CompareMemory *ret = NULL;
+	CompareMemory *cptr = (CompareMemory *)HeapAlloc(GetProcessHeap(), HEAP_ZERO_MEMORY, sizeof(CompareMemory));
+	
+	if (cptr == NULL) {
+		printf("couldnt alloc mem for compare\n");
+		ExitProcess(0);
+	}
+/*
+
+  //  we dont even need a copy of the data since we're using crc to verify...
+
+  cptr->Data = (char *)HeapAlloc(GetProcessHeap(), HEAP_ZERO_MEMORY, Size + 1);
+	if (cptr->Data == NULL) {
+		printf("couldnt allocate spce for data %d\n", Size);
+		ExitProcess(0);
+	}
+	CopyMemory(cptr->Data, Data, Size); */
+	cptr->Size = Size;
+	cptr->RegionVerify = CRC_Region(Address, Size);
+
+	cptr->next = compare_list;
+	compare_list = cptr;
+
+	ret = cptr;
+
+	return ret;
+}
+
+
+char *PageVerify(DWORD_PTR Address, int Size, DWORD_PTR *ret_size) {
+	char *ret = NULL;
+	CompareMemory *cptr = compare_find(Address);
+
+	if (cptr == NULL) return NULL;
+	if (cptr->Size != Size) return NULL;
+
+
+	return CRC_Verify(cptr->RegionVerify, ret_size, 0);
+}
+
+
 
 char *MemoryData(DWORD_PTR *size, DWORD_PTR *page_count) {
 	char *ret = NULL;
 	DWORD_PTR mem_size_pages = 0x10000; // start with 16 megabytes of space for pages (roughly with the 4 byte address)
 	DWORD_PTR mem_sizes_total = mem_size_pages * 0x1000;
+	int first = (memory_data_first++ == 0);
 
 	char *_ptr = (char *)HeapAlloc(GetProcessHeap(), 0, mem_sizes_total);
 	if (_ptr == NULL) {
@@ -411,7 +676,7 @@ char *MemoryData(DWORD_PTR *size, DWORD_PTR *page_count) {
 				
 				DWORD_PTR cur_size = (ptr - _ptr);
 				// if the next page goes over the size.. we need a bigger buffer
-				if ((DWORD_PTR)(cur_size + 0x1000) > mem_sizes_total) {
+				if ((DWORD_PTR)(cur_size + (sizeof(DWORD_PTR) + 1 + 0x1000)) > mem_sizes_total) {
 					printf("increasing memory total %d need %X\n", mem_sizes_total, cur_size + 0x1000);
 					mem_size_pages += 0x1000; // allocate another 16megs..
 					mem_sizes_total = 0x1000 * mem_size_pages;
@@ -423,20 +688,46 @@ char *MemoryData(DWORD_PTR *size, DWORD_PTR *page_count) {
 					_ptr = newbuf;
 					ptr = (_ptr + cur_size);
 				}
-	
-				DWORD_PTR *DataAddr = (DWORD_PTR *)ptr;
-				*DataAddr = (DWORD_PTR)Addr;
-				ptr += sizeof(DWORD_PTR);
-				
 
-				CopyMemory(ptr, PageBuffer, BytesRead);
-				if (BytesRead < 0x1000) {
-					BytesRead = 0x1000;
+				char *verify_ret = NULL;
+				DWORD_PTR verify_size = 0;
+				if (!first) {
+					// now lets verify the crc against our first snapshot...
+					verify_ret = PageVerify((DWORD_PTR)Addr, BytesRead, &verify_size);
+
 				}
-				ptr += BytesRead;
-				
+
+
+				if (first && !verify_ret) {
+					// type = 1 (original snapshot..)
+					*ptr++ = 1;
+
+					DWORD_PTR *DataAddr = (DWORD_PTR *)ptr;
+					*DataAddr = (DWORD_PTR)Addr;
+					ptr += sizeof(DWORD_PTR);
+					
+
+					CopyMemory(ptr, PageBuffer, BytesRead);
+					if (BytesRead < 0x1000) {
+						BytesRead = 0x1000;
+					}
+					ptr += BytesRead;
+					
+				} else {
+					// type = 2 (relates to original snapshot)
+					*ptr++ = 2;
+
+					DWORD_PTR *VerifySize = (DWORD_PTR *)ptr;
+					*VerifySize = verify_size;
+					ptr += sizeof(DWORD_PTR);
+
+					CopyMemory(ptr, verify_ret, verify_size);
+					ptr += verify_size;
+				}
+
 				*size = (DWORD_PTR)(ptr - _ptr);
 				ret = _ptr;
+
 				Wrote++;
             }
 			
@@ -548,6 +839,7 @@ BOOL IndexThreads(unsigned long pid) {
 	
 	if (pid == 0) pid = CurrentProcID;
 	
+
     // Fill in the size of the structure before using it. 
     te32.dwSize = sizeof(THREADENTRY32); 
 	// Take a snapshot of all threads currently in the system. 
@@ -671,9 +963,66 @@ ErrorHandler:
     return FALSE;
 }
 
+
+void InjDLL() {
+			printf("Injecting PROXY DLL for emulation help\n");
+			/*
+			DWORD old_prot = 0;
+			char *remote_dll_addr = (char *)VirtualAllocEx(hProcess, 0, 4096, MEM_COMMIT|MEM_RESERVE, PAGE_EXECUTE_READWRITE);
+			int inserted = 0;
+			if (remote_dll_addr) {
+				char *dll_name = StrRChr(dll, 0, '\\');
+				dll_name++;
+				inserted = (FindModuleBase(pid, dll_name) != NULL);
+			}
+			// get rva of loadlibrary...
+			printf("Inserted DLL successfully? %d\n", inserted);
+			if (remote_dll_addr == NULL || !inserted) {
+				printf("error allocating space in the remote process.. resuming normally\n");
+				PauseThreads(pid, 1);
+			}*/
+			PVOID lpReturn = NULL;
+			RemoteLibraryFunction( hProcess, "kernel32.dll", "LoadLibraryA", dll, lstrlenA(dll), &lpReturn );
+			HMODULE hInjected = reinterpret_cast<HMODULE>( lpReturn );
+			if (!hInjected) {
+				printf("Couldnt inject..resuming normally\n");
+			} else printf("Successfully injected.. handle %X\n", hInjected);
+
+			InterlockedIncrement(&injected);
+			InterlockedDecrement(&inject_dll);
+			// resume all threads...
+			PauseThreads(_pid, 1);
+
+				DebugActiveProcessStop(_pid);
+
+			ExitProcess(0);
+
+}
+
+// lets limit dumps
+int dump_count = 0;
+int first_ctrl_c = 0;
+BOOL WINAPI HandlerRoutine(DWORD dwCtrlType) {
+	if (dwCtrlType == CTRL_C_EVENT) {
+		/*if (first_ctrl_c++) {
+			ExitProcess(0);
+		}*/
+		InterlockedIncrement(&inject_dll);
+			return true;
+	}
+	return false;
+}
+
+
 int main(int argc, char *argv[]) {
 	AddDebugPrivilege();
-	
+
+
+	SetConsoleCtrlHandler(&HandlerRoutine, 1);
+
+	// *** FIX move crc to crc.cpp and regionverify to its own as well.. along with splitting up everything
+	chksum_crc32gentab();
+
 	// create our structures for the functions that respond with data to the applications we are fuzzing...
 	FuzzySetup();
 	
@@ -710,71 +1059,82 @@ int main(int argc, char *argv[]) {
 	printf("Attaching debugger to %d\n", pid);
 	int done = 0;
 	while (!done) {
-	if (DebugTillReady(pid)) {
+		int do_we_dump = 0;
+	if (DebugTillReady(pid,(int)( dll == NULL), &do_we_dump)) {
 
 		printf("Pausing all other threads\n");
 		// now lets dump all other threads in case multi-threading is a necessity to trigger the bug
 		PauseThreads(pid, 0);
-		printf("Dumping thread context to snapshot\n");
-		DWORD thread_data_size = 0;
-		DWORD thread_count = 0;
-		char *thread_data = ThreadData(&thread_data_size, &thread_count);
-		
-		printf("Thread Data Size %d PTR %X\n", thread_data_size, thread_data);
+
+		if (do_we_dump) {
+			printf("Dumping thread context to snapshot\n");
+			DWORD thread_data_size = 0;
+			DWORD thread_count = 0;
+			char *thread_data = ThreadData(&thread_data_size, &thread_count);
+			
+			printf("Thread Data Size %d PTR %X\n", thread_data_size, thread_data);
+
+			DWORD module_data_size = 0;
+			DWORD module_count = 0;
+			char *module_data = NULL;
+
+			// only dump module information once...
+			if (snapshot_count == 0) {
+				printf("Dump module information to snapshot\n");
+				module_data = ModuleData(pid, &module_data_size, &module_count);
+				printf("Module Data Size %d PTR %X count %d\n", module_data_size, module_data, module_count);
+			}
+
+			printf("Dump memory to snapshot\n");
+			DWORD memory_data_size = 0;
+			DWORD memory_page_count = 0;
+			char *memory_data = MemoryData(&memory_data_size, &memory_page_count);
+			printf("Memory Dump Size %d PTR %X\n", memory_data_size, memory_data);
+
+			char fname[1024];
+			wsprintf(fname, "z:\\shared\\dump\\%d_%d_snapshot.dat", pid, snapshot_count);
+			
+			
+			printf("Writing data to disk as '%s'\n", fname);		
+
+			
+			
+			printf("Opening output file: %s\n", fname);
+			FILE *fd = fopen(fname, "wb");
+			if (fd == NULL) {
+				printf("couldnt open output file [%s]\n", fname);
+				exit(-1);
+			}
 
 
+			FuzzSnapshotInfo snapinfo;
+			snapinfo.hdr = 0xFFFFEEEE;
+			snapinfo.version = 0x01000210;
+			snapinfo.memory_data_size = memory_data_size;
+			snapinfo.page_count = memory_page_count;
+			snapinfo.module_count = module_count;
+			snapinfo.thread_count = thread_count;
+			snapinfo.module_data_size = module_data_size;
+			snapinfo.thread_data_size = thread_data_size;
 
-		printf("Dump module information to snapshot\n");
-		DWORD module_data_size = 0;
-		DWORD module_count = 0;
-		char *module_data = ModuleData(pid, &module_data_size, &module_count);
-		printf("Module Data Size %d PTR %X count %d\n", module_data_size, module_data, module_count);
+			fwrite((const void *)&snapinfo, 1, sizeof(FuzzSnapshotInfo), fd);
+			fwrite((const void *)thread_data, 1, thread_data_size, fd);
+			if (snapshot_count == 0) {
+				fwrite((const void *)module_data, 1, module_data_size, fd);
+			}
+			fwrite((const void *)memory_data, 1, memory_data_size, fd);
 
-		printf("Dump memory to snapshot\n");
-		DWORD memory_data_size = 0;
-		DWORD memory_page_count = 0;
-		char *memory_data = MemoryData(&memory_data_size, &memory_page_count);
-		printf("Memory Dump Size %d PTR %X\n", memory_data_size, memory_data);
+			snapshot_count++;
+			fclose(fd);
 
-		char fname[1024];
-		wsprintf(fname, "%d_%d_snapshot.dat", pid, snapshot_count);
-		
-		printf("Writing data to disk as '%s'\n", fname);		
 
-		
-		
-		printf("Opening output file: %s\n", fname);
-		FILE *fd = fopen(fname, "wb");
-		if (fd == NULL) {
-			printf("couldnt open output file [%s]\n", fname);
-			exit(-1);
+			if (thread_data != NULL) HeapFree(GetProcessHeap(), 0, thread_data);
+			if (module_data != NULL) HeapFree(GetProcessHeap(), 0, module_data);
+			if (memory_data != NULL) HeapFree(GetProcessHeap(), 0, memory_data);
+
+			printf("Finished dumping snapshot\n");
+
 		}
-
-
-		FuzzSnapshotInfo snapinfo;
-		snapinfo.hdr = 0xFFFFEEEE;
-		snapinfo.version = 0x01000203;
-		snapinfo.memory_data_size = memory_data_size;
-		snapinfo.page_count = memory_page_count;
-		snapinfo.module_count = module_count;
-		snapinfo.thread_count = thread_count;
-		snapinfo.module_data_size = module_data_size;
-		snapinfo.thread_data_size = thread_data_size;
-
-		fwrite((const void *)&snapinfo, 1, sizeof(FuzzSnapshotInfo), fd);
-		fwrite((const void *)thread_data, 1, thread_data_size, fd);
-		fwrite((const void *)module_data, 1, module_data_size, fd);
-		fwrite((const void *)memory_data, 1, memory_data_size, fd);
-
-		
-		fclose(fd);
-
-		HeapFree(GetProcessHeap(), 0, thread_data);
-		HeapFree(GetProcessHeap(), 0, module_data);
-		HeapFree(GetProcessHeap(), 0, memory_data);
-
-		printf("Finished dumping snapshot\n");
-
 
 		
 
@@ -783,48 +1143,41 @@ int main(int argc, char *argv[]) {
 		if (dll == NULL) {
 
 			printf("Re-implementing breakpoints for next function!\n");
-			Modifications_Redo();
+			//Modifications_Redo();
 
 			printf("Resume original process..\n");
-			PauseThreads(pid, 1);
+			if (!InterlockedExchangeAdd(&inject_dll, 0)) {
+				PauseThreads(pid, 1);
+			}
+
 		
 		} else {
-			done = 1;
-			printf("Injecting PROXY DLL for emulation help\n");
-			/*
-			DWORD old_prot = 0;
-			char *remote_dll_addr = (char *)VirtualAllocEx(hProcess, 0, 4096, MEM_COMMIT|MEM_RESERVE, PAGE_EXECUTE_READWRITE);
-			int inserted = 0;
-			if (remote_dll_addr) {
-				char *dll_name = StrRChr(dll, 0, '\\');
-				dll_name++;
-				inserted = (FindModuleBase(pid, dll_name) != NULL);
-			}
-			// get rva of loadlibrary...
-			printf("Inserted DLL successfully? %d\n", inserted);
-			if (remote_dll_addr == NULL || !inserted) {
-				printf("error allocating space in the remote process.. resuming normally\n");
-				PauseThreads(pid, 1);
-			}*/
-			PVOID lpReturn = NULL;
-			RemoteLibraryFunction( hProcess, "kernel32.dll", "LoadLibraryA", dll, lstrlenA(dll), &lpReturn );
-			HMODULE hInjected = reinterpret_cast<HMODULE>( lpReturn );
-			if (!hInjected) {
-				printf("Couldnt inject..resuming normally\n");
-			} else printf("Successfully injected.. handle %X\n", hInjected);
-
-			// resume all threads...
-			PauseThreads(pid, 1);
-			
+			printf("CTRL-C to inject DLL and exit...");
+		
 			
 		}
+	} else {
+		done = 1;
 	}
 
 		
 
 	}
 
+	Modifications_Undo();
+
 	DebugActiveProcessStop(pid);
+
+	if (InterlockedExchangeAdd(&inject_dll, 0)) {
+		//InjDLL();
+	}
+
+	PauseThreads(pid, 1);
+		
+
+	
+	
+	printf("Detached debugger from PID %X\n", pid);
 
 	ExitProcess(0);
 

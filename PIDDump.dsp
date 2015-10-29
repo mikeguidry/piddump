@@ -117,5 +117,65 @@ SOURCE=.\structures.h
 
 # PROP Default_Filter "ico;cur;bmp;dlg;rc2;rct;bin;rgs;gif;jpg;jpeg;jpe"
 # End Group
+# Begin Group "udis86"
+
+# PROP Default_Filter ""
+# Begin Source File
+
+SOURCE=.\udis86\decode.c
+# End Source File
+# Begin Source File
+
+SOURCE=.\udis86\decode.h
+# End Source File
+# Begin Source File
+
+SOURCE=.\udis86\extern.h
+# End Source File
+# Begin Source File
+
+SOURCE=.\udis86\input.c
+# End Source File
+# Begin Source File
+
+SOURCE=.\udis86\input.h
+# End Source File
+# Begin Source File
+
+SOURCE=.\udis86\itab.c
+# End Source File
+# Begin Source File
+
+SOURCE=.\udis86\itab.h
+# End Source File
+# Begin Source File
+
+SOURCE=".\udis86\syn-att.c"
+# End Source File
+# Begin Source File
+
+SOURCE=".\udis86\syn-intel.c"
+# End Source File
+# Begin Source File
+
+SOURCE=.\udis86\syn.c
+# End Source File
+# Begin Source File
+
+SOURCE=.\udis86\syn.h
+# End Source File
+# Begin Source File
+
+SOURCE=.\udis86\types.h
+# End Source File
+# Begin Source File
+
+SOURCE=.\udis86\udis86.c
+# End Source File
+# Begin Source File
+
+SOURCE=.\udis86\udis86.h
+# End Source File
+# End Group
 # End Target
 # End Project
