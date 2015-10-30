@@ -84,8 +84,8 @@ struct _fuzzy_list {
 } fuzzy_list[] = {
 	// list all functions which return data to the application that we would like to fuzz
 	{ "ws2_32",		"recv"},
-	//{ "ws2_32",		"recvfrom"},
-	{ "wininet", "InternetReadFile" },
+	//{ "ws2_32",	"recvfrom"},
+	{ "wininet",	"InternetReadFile" },
 	{ "kernel32",	"ReadFile" },
 	//{ "kernel32",	"GetMessageA" },
 	//{ "kernel32",	"GetMessageW" },
@@ -537,6 +537,7 @@ typedef struct _compare_memory {
 	char *Data;
 	int Size;
 	RegionCRC *RegionVerify;
+	unsigned int page_information_crc;
 } CompareMemory;
 
 CompareMemory *compare_list = NULL;
@@ -599,8 +600,9 @@ char *PageVerify(DWORD_PTR Address, int Size, DWORD_PTR *ret_size) {
 
 char *MemoryData(DWORD_PTR *size, DWORD_PTR *page_count, int snapshot_count) {
 	char *ret = NULL;
-	DWORD_PTR mem_size_pages = 0x10000; // start with 16 megabytes of space for pages (roughly with the 4 byte address)
-	DWORD_PTR mem_sizes_total = mem_size_pages * 0x1000;
+	int single_page = (sizeof(DWORD_PTR) + 0x1000 + sizeof(MEMORY_BASIC_INFORMATION));
+	DWORD_PTR mem_size_pages = 256*16; // start with 16 megabytes of space for pages (roughly with the 4 byte address)
+	DWORD_PTR mem_sizes_total = single_page * 0x1000;
 	int first = (snapshot_count == 0) ? 1 : 0;
 
 	char *_ptr = (char *)HeapAlloc(GetProcessHeap(), 0, mem_sizes_total);
@@ -655,8 +657,6 @@ char *MemoryData(DWORD_PTR *size, DWORD_PTR *page_count, int snapshot_count) {
 		}
 
 		// Get the data!
-		// TODO: Think about acquireing larger amounts of data
-		//       like... 1 MB at a time sounds good
 		DWORD PageCount = MemInfo.RegionSize / 0x1000;
 		DWORD j = 0;
 		for(; j < PageCount; j++)
@@ -676,10 +676,10 @@ char *MemoryData(DWORD_PTR *size, DWORD_PTR *page_count, int snapshot_count) {
 				
 				DWORD_PTR cur_size = (ptr - _ptr);
 				// if the next page goes over the size.. we need a bigger buffer
-				if ((DWORD_PTR)(cur_size + (sizeof(DWORD_PTR) + 0x1000)) > mem_sizes_total) {
+				if ((DWORD_PTR)(cur_size + single_page) > mem_sizes_total) {
 					printf("increasing memory total %d need %X\n", mem_sizes_total, cur_size + 0x1000);
-					mem_size_pages += 0x1000; // allocate another 16megs..
-					mem_sizes_total = 0x1000 * mem_size_pages;
+					mem_size_pages += 0x1000;
+					mem_sizes_total = single_page * mem_size_pages;
 					char *newbuf = (char *)HeapReAlloc(GetProcessHeap(), HEAP_ZERO_MEMORY, _ptr, mem_sizes_total);
 					if (newbuf == NULL) {
 						printf("fatal error allocating more space for memory! cur_size %d needed %d\n", cur_size, mem_sizes_total);
@@ -696,6 +696,32 @@ char *MemoryData(DWORD_PTR *size, DWORD_PTR *page_count, int snapshot_count) {
 					verify_ret = PageVerify((DWORD_PTR)Addr, BytesRead, &verify_size);
 
 				}
+
+
+				// we need information regarding the pages protections
+				// these are necessary to accurately activate SEH/detect some vulnerabilities
+				// todo: if we want to optimize later.. we can process 'RegionSize' and skip this for subsequent pages (until that size)
+			
+				MEMORY_BASIC_INFORMATION MemInfo;
+				VirtualQueryEx(hProcess, Addr, &MemInfo, sizeof(MEMORY_BASIC_INFORMATION));
+				unsigned int page_information_crc = (unsigned int)chksum_crc32((unsigned char *)&MemInfo, sizeof(MemInfo));
+				int good_info_crc = 0;
+
+				CompareMemory *cptr = (CompareMemory *)compare_find((DWORD_PTR)Addr);
+				if (cptr != NULL) {
+					if (cptr->page_information_crc == page_information_crc)
+						good_info_crc = 1;
+				}
+				
+				*ptr++ = good_info_crc;
+
+				if (good_info_crc == 0) {					
+					// copy the page information into the output buffer...
+					CopyMemory(ptr, &MemInfo, sizeof(MEMORY_BASIC_INFORMATION));
+					ptr += sizeof(MEMORY_BASIC_INFORMATION);
+					
+				}
+
 
 
 				if (first) {
@@ -721,8 +747,10 @@ char *MemoryData(DWORD_PTR *size, DWORD_PTR *page_count, int snapshot_count) {
 					*VerifySize = verify_size;
 					ptr += sizeof(DWORD_PTR);
 
-					CopyMemory(ptr, verify_ret, verify_size);
-					ptr += verify_size;
+					if (verify_ret != NULL) {
+						CopyMemory(ptr, verify_ret, verify_size);
+						ptr += verify_size;
+					}
 				}
 
 				*size = (DWORD_PTR)(ptr - _ptr);
@@ -738,7 +766,7 @@ char *MemoryData(DWORD_PTR *size, DWORD_PTR *page_count, int snapshot_count) {
 		}
 		
 		// Iterate
-		i += 0x1000 * PageCount;
+		i += 0x1000 * PageCount;	
 	}
 	
 	// Done!
