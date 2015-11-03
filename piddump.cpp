@@ -179,7 +179,7 @@ int ThreadAdd(DWORD_PTR ThreadID) {
 
 	HANDLE hThread = OpenThread(THREAD_ALL_ACCESS, FALSE, ThreadID);
 	CONTEXT ctx;
-	ctx.ContextFlags = CONTEXT_FULL;
+	ctx.ContextFlags = CONTEXT_ALL;
 	if (GetThreadContext(hThread, &ctx) == 0) {
 		CloseHandle(hThread);
 		return -1;
@@ -202,7 +202,7 @@ int ThreadAdd(DWORD_PTR ThreadID) {
 		if (tinfo != NULL) {
 			tinfo->ThreadID = ThreadID;
 			CONTEXT ctx;
-			ctx.ContextFlags = CONTEXT_FULL;
+			ctx.ContextFlags = CONTEXT_ALL;
 
 			if (GetThreadContext(hThread, &ctx) != 0) {	
 				LDT_ENTRY ldtSel;
@@ -228,7 +228,7 @@ int ThreadAdd(DWORD_PTR ThreadID) {
 					// copy the CONTEXT to another CONTEXT (this one will have the segment selectors resolved to linear addresses..
 					CopyMemory(&tinfo->ctx_segments, &tinfo->ctx, sizeof(CONTEXT));
 					ResolveSegs(hThread, &tinfo->ctx_segments);
-				
+
 					Modification *modptr = ModificationSearch(ctx.Eip, NULL);
 					if (modptr != NULL) {
 						tinfo->fuzz = 1;
@@ -784,7 +784,7 @@ int StepThread(HANDLE hThread) {
 	// get threads EBP
 	CONTEXT ctx;
 	GetThreadContext(hThread, &ctx);
-	ctx.ContextFlags = CONTEXT_FULL;
+	ctx.ContextFlags = CONTEXT_ALL;
 	if (GetThreadContext(hThread, &ctx) == 0) {
 		printf("Couldnt get thread context.. %X\n", hThread);
 		return -1;

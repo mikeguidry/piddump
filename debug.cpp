@@ -466,7 +466,9 @@ int DebugTillReady(DWORD_PTR PID, int next, int *do_we_dump) {
 							hThread2 = OpenThread(THREAD_ALL_ACCESS, FALSE, DebugEv.dwThreadId);
 							SuspendThread(hThread2);
 
-							ctx.ContextFlags = CONTEXT_FULL;
+							// we want debug registers just in case we begin using hardware breakpoints rather than
+							// byte replacing.. (it would be faster.... but limits to 4 functions )
+							ctx.ContextFlags = CONTEXT_ALL;
 							if (GetThreadContext(hThread2, &ctx) == 0) {
 								printf("Couldnt get thread context.. %X\n", hThread2);
 								return -1;
