@@ -379,7 +379,7 @@ extern long inject_dll;
 // each thread has to be stepped out of any windows DLLs or other DLLs...
 // so we can hook and redirect those to API proxy or a simulation..
 //int StepUpFrame(int PID, HANDLE hThread, DWORD_PTR TID) {
-int DebugTillReady(DWORD_PTR PID, int next, int *do_we_dump) {
+int DebugTillReady(DWORD_PTR PID, int next, int *do_we_dump, int *overall_count) {
 	Modification *mptr = NULL;
 	printf("\n----\nDebug Till Ready\n");	
 	// get threads context..
@@ -503,7 +503,15 @@ int DebugTillReady(DWORD_PTR PID, int next, int *do_we_dump) {
 
 								// take all thread information before execution resumes
 								IndexThreads(PID);
-								*do_we_dump = 1;
+
+								// we will dump 15% of the time to speed up the process to start now
+								// before i finish the XEN -> Guest memory dumping.. which should be insanely fast if i can 
+								// do COW VM memory correwctly (snapshot etc)
+								if ((*overall_count++ % 100) < 15) {
+									*do_we_dump = 1;
+								} else {
+									*do_we_dump = 0;
+								}
 							} else {
 								*do_we_dump = 0;
 							}

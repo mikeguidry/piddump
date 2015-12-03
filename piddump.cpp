@@ -32,7 +32,7 @@ BOOL  AddDebugPrivilege();
 int StepUpFrame(int PID, HANDLE hThread, DWORD_PTR TID);
 int AddrInExecutable(DWORD_PTR pid, DWORD_PTR Address);
 DWORD_PTR RemoteDerefDWORD(DWORD_PTR Address);
-int DebugTillReady(DWORD_PTR, int, int *);
+int DebugTillReady(DWORD_PTR, int, int *, int *);
 int FindModuleBase(DWORD_PTR pid, char *module);
 
 
@@ -528,6 +528,7 @@ void RegionFree(RegionCRC **rptr) {
 }
 
 
+long compare_total_size = 0;
 // this is where we will hold the initial snapshot.. so all of the seq. can be much smaller and hopefully faster
 // to dump..it would be great to offload this to another machine using ZeroMQ.. and a ton faster than writing locally to disk
 
@@ -573,8 +574,14 @@ CompareMemory *compare_add(DWORD_PTR Address, char *Data, int Size) {
 		ExitProcess(0);
 	}
 	CopyMemory(cptr->Data, Data, Size); */
+	cptr->Address = Address;
 	cptr->Size = Size;
-	cptr->RegionVerify = CRC_Region(Address, Size);
+	if (Data != NULL)
+		cptr->RegionVerify = CRC_Region(Address, Size);
+
+	int total_size = (sizeof(DWORD_PTR) * 2) + Size + sizeof(MEMORY_BASIC_INFORMATION);
+	InterlockedExchangeAdd(&compare_total_size, total_size);
+
 
 	cptr->next = compare_list;
 	compare_list = cptr;
@@ -597,8 +604,127 @@ char *PageVerify(DWORD_PTR Address, int Size, DWORD_PTR *ret_size) {
 }
 
 
+void WriteSingleData(char **_ptr, DWORD_PTR Address, DWORD_PTR Size, DWORD_PTR *good) {
+	char *ptr = (char *)*_ptr;
+	char * Start = *_ptr;
+	char read[0x1000];
+	DWORD rw_count = 0;
+
+	ReadProcessMemory(hProcess, (void *)Address,(char *)&read, 0x1000, &rw_count);
+	if (rw_count > 0) {
+		
+		*(DWORD_PTR *)(ptr++) = Address;
+		*(DWORD_PTR *)(ptr++) = rw_count;
+	
+
+		CopyMemory(ptr,(void *) &read, rw_count);
+		ptr += rw_count;
+	}
+	
+	*_ptr = ptr;
+	*good = 1;
+	
+	return;
+}
+
+
+
+
+
+char *MemoryData_Logged(DWORD_PTR *size, DWORD_PTR *_page_count) {
+	char ebuf[1024];
+	int start = GetTickCount()/1000;
+	
+	int total_size = InterlockedExchangeAdd(&compare_total_size, 0);
+	
+	char *_ptr = (char *)HeapAlloc(GetProcessHeap(), HEAP_ZERO_MEMORY, total_size + 1);
+	char *ret = NULL;
+	char *ptr  = (char *)_ptr;
+	int page_count = 0;
+
+	if (ptr == NULL) {
+		__asm int 3
+	}
+
+	DWORD sRet = 0;
+
+	CompareMemory *cptr = NULL;
+	//for (int i = 0; i < VMEM_JTABLE; i++) {
+		//cptr = compare_list[i];
+		for (cptr = compare_list; cptr != NULL; cptr = cptr->next) {
+			if (cptr->Size == 1) {
+				continue;
+			}
+
+			if (cptr->Address == 0) {
+				continue;
+			}
+
+
+
+			MEMORY_BASIC_INFORMATION MemInfo;
+			/*sRet = VirtualQueryEx(GetCurrentProcess(), (LPCVOID)cptr->Address,&MemInfo,sizeof(MemInfo));
+
+			if (sRet == 0 || MemInfo.State == MEM_FREE || MemInfo.State == MEM_RESERVE || MemInfo.State == PAGE_NOACCESS || MemInfo.Protect & PAGE_GUARD) {
+				continue;
+			}*/
+
+			/*
+			ZeroMemory((char *)&ebuf, 1024);
+			wsprintf(ebuf, "Write Address %X size %d", cptr->Address, cptr->Size);
+			*/
+			DWORD_PTR good = 0;
+			//OutputDebugString(ebuf);
+
+			/*DWORD_PTR ret_size = 0;
+			char *verified = CRC_Verify(cptr->RegionVerify, &ret_size, 0);
+
+			if (verified != NULL) {
+				CopyMemory(ptr, verified, ret_size);
+				ptr += ret_size;
+
+				good++;
+				HeapFree(GetProcessHeap(), 0, verified);
+			}*/
+
+			good = 0;
+			WriteSingleData(&ptr, cptr->Address, cptr->Size, &good);
+			if (good == 1)
+				page_count++;
+
+			
+			
+			/*
+			
+
+			*(DWORD_PTR *)(ptr) = cptr->Address;
+			*(DWORD_PTR *)(ptr) = cptr->Size;
+
+			CopyMemory(ptr, (void *)cptr->Address, cptr->Size);
+
+			page_count++;
+			ptr += cptr->Size;
+			*/
+
+		
+		}
+	//}
+
+	*size = (ptr - _ptr);
+	ret = _ptr;
+	*_page_count = page_count;
+
+	int end = GetTickCount()/1000;
+#ifdef DEBUGMSG
+	wsprintf(ebuf, "It took %d seconds to deal with this memory nonsense\r\n", end - start);
+	OutputDebugString(ebuf);
+#endif
+
+	return ret;
+}
 
 char *MemoryData(DWORD_PTR *size, DWORD_PTR *page_count, int snapshot_count) {
+	if (snapshot_count > 0) return MemoryData_Logged(size, page_count);
 	char *ret = NULL;
 	int single_page = (sizeof(DWORD_PTR) + 0x1000 + sizeof(MEMORY_BASIC_INFORMATION));
 	DWORD_PTR mem_size_pages = 256*16; // start with 16 megabytes of space for pages (roughly with the 4 byte address)
@@ -664,6 +790,7 @@ char *MemoryData(DWORD_PTR *size, DWORD_PTR *page_count, int snapshot_count) {
             // A static buffer
             static BYTE PageBuffer[0x1000];
             SIZE_T BytesRead = 0;
+
 			
             // Read (and ignore the errors)
 			LPVOID Addr = (LPVOID)(i + j * 0x1000);
@@ -738,6 +865,45 @@ char *MemoryData(DWORD_PTR *size, DWORD_PTR *page_count, int snapshot_count) {
 						BytesRead = 0x1000;
 					}
 					ptr += BytesRead;
+
+					int want_next_time = 1;
+					switch (MemInfo.AllocationProtect) {
+					case PAGE_READONLY:
+						want_next_time=0;
+						
+						break;
+					case PAGE_READWRITE:
+						
+						break;
+					case PAGE_WRITECOPY:
+						
+						break;
+					case PAGE_EXECUTE:
+						
+						break;
+					case PAGE_EXECUTE_READ:
+						want_next_time=0;
+						
+						break;
+					case PAGE_EXECUTE_READWRITE:
+						
+						break;
+					case PAGE_EXECUTE_WRITECOPY:
+						
+						break;
+						default:
+							break;
+
+					}
+					switch (MemInfo.Type) {
+					case MEM_IMAGE:
+						want_next_time = 0;
+						break;
+					default:
+						break;
+					}
+					if (want_next_time)
+						compare_add((DWORD_PTR)Addr, (char *)PageBuffer, 0x1000);
 					
 				} else {
 					// type = 2 (relates to original snapshot)
@@ -1046,7 +1212,7 @@ int main(int argc, char *argv[]) {
 	AddDebugPrivilege();
 
 
-	SetConsoleCtrlHandler(&HandlerRoutine, 1);
+	//SetConsoleCtrlHandler(&HandlerRoutine, 1);
 
 	// *** FIX move crc to crc.cpp and regionverify to its own as well.. along with splitting up everything
 	chksum_crc32gentab();
@@ -1070,6 +1236,8 @@ int main(int argc, char *argv[]) {
 		exit(-1);	
 	}
 
+	int overall_count = 0;
+
 
 	//printf("Pausing all threads (to add breakpoints)\n");
 	//PauseThreads(pid, 0);
@@ -1088,7 +1256,7 @@ int main(int argc, char *argv[]) {
 	int done = 0;
 	while (!done) {
 		int do_we_dump = 0;
-	if (DebugTillReady(pid,(int)( dll == NULL), &do_we_dump)) {
+	if (DebugTillReady(pid,(int)( dll == NULL), &do_we_dump, &overall_count)) {
 
 		printf("Pausing all other threads\n");
 		// now lets dump all other threads in case multi-threading is a necessity to trigger the bug
